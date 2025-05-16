@@ -1,0 +1,789 @@
+use std::{collections::HashMap, path::{Path, PathBuf}};
+
+use colored::Colorize;
+use lazy_static::lazy_static;
+use strum::{IntoEnumIterator, EnumProperty, EnumIter};
+use serde::{Deserialize, Deserializer, Serialize};
+
+
+const GLOBAL_SIGIL:        char = '$';
+const KEY_OPEN_DELIMITER:  char = '{';
+const KEY_CLOSE_DELIMITER: char = '}';
+
+#[derive(Debug)]
+pub enum Error {
+    IO   {file: PathBuf, message: String},
+    TOML {file: PathBuf, message: String, line: Option<(usize, usize)>},
+    KeySerialization {message: String},
+    KeyCompilation {key: String, name: String, message: String},
+    KeyMutualReferencing {key_names: Vec<(String, PreprocessableName)>}
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        _ = write!(f, "[config.rs] ");
+        match self {
+            Self::IO { file, message } => {
+                write!(f, "in config file {:?}: {message}", file)
+            }
+            Self::TOML { file, message, line } => {
+                write!(f, "in config file {:?}: {message}{}",
+                    file, 
+                    if line.is_some() {
+                        format!(" between lines {}-{}", line.unwrap().0, line.unwrap().1)
+                    } else {
+                        "".to_owned()
+                    }
+                )
+            }
+            Self::KeySerialization { message } => {
+                write!(f, "error while compiling keys: `{message}`")
+            }
+            Self::KeyCompilation { key, name, message } => {
+                write!(f, "error while trying to compile key `{key}` with name `{name}`: `{message}`")
+            } 
+            Self::KeyMutualReferencing { key_names } => {
+                _ = write!(f, "could not compile all keys as some have a mutual reference. \n");
+                _ = write!(f, "here is a list of uncompiled keys: \n");
+                for (key, name) in key_names {
+                    _ = write!(f, "{{Key: {key}, Name: {:?}}}", name);
+                }
+                write!(f, "")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// Common configuration values that can be used as keys in `name`s.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CommonKeyable {
+    pub prefix: String
+}
+
+/// Common configuration values shared across the entire process of
+/// preprocessing and compiling.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Common {
+    #[serde(flatten)]
+    pub keyable: CommonKeyable,
+
+    /// Output file path, overwritten by CLI if a output file
+    /// is given via. CLI.
+    /// TODO: Make it so that if no output path is given (here or cli)
+    /// take the config name and change the extension to .h for output.
+
+
+
+
+
+
+
+    pub output:  Option<PathBuf>,
+
+    /// No. of times the repeat pattern in the [Generator] is
+    /// repeated.
+    pub repeats: usize
+}
+
+/// [Tag]s that the user adds along side a `name` string, these 
+/// get translated into [Todo]s which are just a list of things 
+/// to do to a `name`.
+/// 
+/// [Tag]s can either remove preset [Todo]s or add new [Todo]s.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Tag {
+    NoPrefix
+}
+
+/// A list of things to do to a `name`.
+/// 
+/// These get translated from [Tag] because [Todo]s
+/// are only applied to a `name` while [Tag]s either 
+/// remove preset [Todo]s or add new ones.
+/// 
+/// For example, [Tag::NoPrefix] will remove [Todo::ApplyPrefix] from the list
+/// of actions that would normally be automatically applied to a `name`.
+/// This means you can use tags to customize or override the default behavior
+/// for how `name`s are processed.
+/// 
+/// Done cause it's much more readable than applying pure [Tag]s to a `name`,
+/// and because this forces both [Tag] to be translated via. a `match`
+/// statement and [Todo]s to be applied via. a `match` statement aswell
+/// so that the programmer (me O_O) remembers to update all the apropriate
+/// functions.
+/// 
+/// Adding a [strum::EnumProperty] named `preset` and setting it to `true`
+/// will automatically apply this [Todo] to all `name`s unless removed
+/// by a [Tag].
+#[derive(EnumIter, EnumProperty, Clone, Copy, PartialEq, Eq)]
+pub(self) enum Todo {
+    #[strum(props(preset = true))]
+    ApplyPrefix
+}
+
+lazy_static! {
+    /// A list of preset [Todo]s executed for every `name` unless
+    /// a [Tag] removes it in [Todo::from_tags_with_preset]. 
+    static ref PRESET_TODO: Vec<Todo> = {
+        let mut preset_todo_vec: Vec<Todo> = vec![];
+        for todo in Todo::iter() {
+            if todo.get_bool("preset").is_some_and(|preset| preset == true) {
+                preset_todo_vec.push(todo);
+            }
+        }
+        preset_todo_vec
+    };
+}
+
+impl Todo {
+
+    /// Convert a [Vec] of [Tag] into a [Vec] of [Todo].
+    fn from_tags_with_presets(tags: &Vec<Tag>) -> Vec<Self> {
+        
+        let mut todo_vec: Vec<Self> = PRESET_TODO.clone();
+
+        for tag in tags {
+
+            match *tag {
+                Tag::NoPrefix => {
+                    if todo_vec.contains(&Todo::ApplyPrefix) {
+                        todo_vec.retain(|todo| 
+                            *todo != Todo::ApplyPrefix
+                        );
+                    }
+                }
+            }
+
+        }
+
+        todo_vec
+    }
+
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct StringWithTags {
+    pub tags: Vec<Tag>,
+    pub string: String,
+}
+
+impl StringWithTags {
+
+    // Translates [Tag]s into [Todo]s and applies
+    // the [Todo]s to the string.
+    // `common_keys` is needed for certaint [Tag]s.
+    pub(self) fn apply_tags(
+        &self,
+        common_keys: &CommonKeyable
+    ) -> String {
+
+        let mut tagged_string = self.string.clone();
+
+        let todo_vec = Todo::from_tags_with_presets(&self.tags);
+
+        for todo in todo_vec {
+
+            match todo {
+                Todo::ApplyPrefix => {
+                    tagged_string = common_keys.prefix.to_owned() + &tagged_string
+                }
+            }
+
+        }
+
+        tagged_string
+
+    }
+
+}
+
+/// A name of... most likely definition created by this program
+/// or already existing in some other file.
+/// 
+/// Why the `Preprocessable` suffix?
+/// --------------------------------
+/// 
+/// Because like the C compiler, my compiler does preprocessing first
+/// and then compiling.
+/// 
+/// Preprocessing is done with `key/name` pairs.
+/// 
+/// These pairs can be defined either in the `[preamble.key]`
+/// section or in a `[preamble.definition]` entry.
+/// 
+/// The `key` in this pair can be used inside of other values in the 
+/// config file to reference the `name` the `key` represents. 
+/// But these `keys` can be used inside of a `name` aswell.
+/// 
+/// The reason the `name` isn't stored in a string is because
+/// names can have [`Tag`]s that go along side them.
+/// 
+/// Due to that we have to differentiate 2 `names`, one with
+/// [Tag]s and one without [Tag]s.
+/// 
+/// Why use `keys`? Read the [Definition] docs. 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum PreprocessableName {
+    Raw(String),
+    Tagged(StringWithTags)
+}
+
+impl Default for PreprocessableName {
+    fn default() -> Self {
+        Self::Raw(String::new())
+    }
+}
+
+
+/// A name of a definition from C.
+/// This name can be both [Name::Uncompiled] and [Name::Compiled].
+/// 
+/// [Name::Uncompiled] names have a reference to keys (both [Definition::key]
+/// & [Key::key]) in the form of `${KEY}`, and when these references
+/// are parsed and compiled we get a [Name::Compiled].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum PreprocessableString<T> {
+    NotPreprocessed(T),
+    Preprocessed(String)
+}
+
+impl Default for PreprocessableString<PreprocessableName> {
+
+    fn default() -> Self {
+        Self::NotPreprocessed(PreprocessableName::default())
+    }
+
+}
+
+impl Default for PreprocessableString<String> {
+
+    fn default() -> Self {
+        Self::NotPreprocessed(String::new())
+    }
+
+}
+
+/// This deserializer flattens [PreprocessableString] which stores
+/// [PreprocessableName] inside of it in [Definition] and [Key].
+/// 
+/// It also sets it automatically as a 
+/// [PreprocessableString::NotPreprocessed].
+fn preprocessable_name_deserializer<'de, D>(
+    deserializer: D
+) -> Result<PreprocessableString<PreprocessableName>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let unprocessed_name = PreprocessableName::deserialize(deserializer)?;
+    Ok(PreprocessableString::NotPreprocessed(unprocessed_name))
+}
+
+/// This deserializer flattens [PreprocessableString] 
+/// and automatically stores the [String] inside of
+/// [PreprocessableString::NotPreprocessed].
+fn preprocessable_string_deserializer<'de, D>(
+    deserializer: D
+) -> Result<PreprocessableString<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let unprocessed_string = String::deserialize(deserializer)?;
+    Ok(PreprocessableString::NotPreprocessed(unprocessed_string))
+}
+
+/// Same as [preprocessable_string_deserializer] but with a [Option].
+fn preprocessable_option_string_deserializer<'de, D>(
+    deserializer: D
+) -> Result<Option<PreprocessableString<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let optional_unprocessed_string = Option::<String>::deserialize(deserializer)?;
+    Ok(optional_unprocessed_string.map(PreprocessableString::NotPreprocessed))
+}
+
+/// A `#define` from C.
+/// 
+/// [Definition::key] is a reference to [Definition::name].
+/// 
+/// Reasoning for [`Definition::key`]
+/// ---------------------------------
+/// There are 2 reasons to use [Definition::key]: 
+/// 1. `Refactorability`: If we ever change [Definition::name] 
+///    we don't have to update other parts of our config that 
+///    reference that [Definition].
+/// 2. `Consistency`: [Definition::name]s will change due to [Todo]s,
+///    so we can't be sure what the final name will be. [Definition::key] 
+///    can only be changed by the user and nothing else.
+/// 
+/// Example
+/// -------
+/// ```C
+/// /* This is how a Definition will look in C */
+/// 
+/// /* With Definition::parameters being Some */
+/// #define name(parameters) expansion
+/// 
+/// /* With Definition::parameters being None */
+/// #define name expansion
+/// ```
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Definition {
+    pub key:        String,
+    #[serde(deserialize_with = "preprocessable_name_deserializer")]
+    pub name:       PreprocessableString<PreprocessableName>,
+    pub parameters: Option<Vec<String>>,
+    #[serde(deserialize_with = "preprocessable_string_deserializer")]
+    pub expansion:  PreprocessableString<String>,
+}
+
+/// Keys that might reference anything from another C file or the
+/// [Preamble::raw].
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Key {
+    pub key:  String,
+    #[serde(deserialize_with = "preprocessable_name_deserializer")]
+    pub name: PreprocessableString<PreprocessableName>
+}
+
+/// Custom preamble that is inserted as is (first preprocessed tho).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Preamble {
+    #[serde(deserialize_with = "preprocessable_option_string_deserializer")]
+    pub raw:  Option<PreprocessableString<String>>,
+    pub keys: Option<Vec<Key>>,
+}
+
+/// Fallbacks the [Generator] uses when encountering strange varadict
+/// argument counts.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Fallbacks {
+    #[serde(deserialize_with = "preprocessable_string_deserializer")]
+    /// What to do when the varadict argument count is not a multiple
+    /// of [Paramaters::Varadict] in [Core::args].
+    pub unparity:  PreprocessableString<String>,
+
+    #[serde(deserialize_with = "preprocessable_string_deserializer")]
+    /// What to do when the varadict argument count is 0?
+    pub empty:  PreprocessableString<String>,
+}
+
+/// In this XMVA macro i've invisioned there is but one catch,
+/// there must exist a x-macro for every possible varadict argument
+/// count that the XMVA macro may encounter.
+/// 
+/// This structure configures a generator that generates these
+/// x-macros that then handle the creation of your code for every
+/// varadict argument count up to [`Common::repeats`] amount of
+/// varadict arguments.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Generator {
+    /// On strange varadict argument counts, set what the generated
+    /// x-macro will write out.
+    pub fallbacks: Fallbacks,
+    
+    /// What to write before the repeat part.
+    #[serde(deserialize_with = "preprocessable_string_deserializer")]
+    pub preamble:  PreprocessableString<String>,
+    
+    /// THE repeat part.
+    /// 
+    /// This guy can utilize some special symbols
+    /// unlike the rest of us mortal [PreprocessableString]s :(.
+    /// 
+    /// For one, we have `${key}` like the rest of the world,
+    /// but we also have 2 more:
+    /// 
+    /// - `$(argument_count)`: which tells us where to place what argument.
+    /// - `$[character]`: which is a character that will repeat until the last
+    ///                 repeat where we will skip it
+    /// 
+    /// Example
+    /// -------
+    /// ```toml
+    /// # Lets say that args -> {varadict = 2}.
+    /// # Which means we require a minimum of 2 varadict arguments.
+    /// # Here our first argument out of our varadict argument pairs
+    /// # will be placed before a comma.
+    /// # This pattern will repeat like this:
+    /// # _00
+    /// # _00, _02
+    /// # _00, _02, 04
+    /// # ...
+    /// repeat = "$(0)[,]"
+    /// 
+    /// # Heres something a tad bit more complex.
+    /// # Let's say ${prefix} is `YA_`.
+    /// # This pattern will repeat like this:
+    /// # [YA_ ## _00] = _01
+    /// # [YA_ ## _00] = _01, [YA_ ## _02] = _03
+    /// # [YA_ ## _00] = _01, [YA_ ## _02] = _03, [YA_ ## _04] = _05
+    /// # ...
+    /// repeat = "[${prefix} ## $(0)] = $(1)$[,]"
+    /// ```
+    #[serde(deserialize_with = "preprocessable_string_deserializer")]
+    pub repeat:    PreprocessableString<String>,
+
+    // What to write after the repeat part.
+    #[serde(deserialize_with = "preprocessable_string_deserializer")]
+    pub postamble: PreprocessableString<String>
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum Paramaters {
+    Named    {named: String},
+    Varadict {unamed: usize}
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Core {
+    pub name: PreprocessableName,
+    pub args: Vec<Paramaters>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Config {
+    /// Common parameters, such as the global prefix & repeat count.
+    pub common:     Common, 
+    /// A raw preamble, where you can write anything you want
+    /// to be included before the generated code.
+    /// Includes keys so that you can use whatever you wrote in the
+    /// preamble in any part of the code with its key much more nicely.
+    pub preamble:   Option<Preamble>,
+    /// The cooler preamble.
+    pub definition: Option<Vec<Definition>>,
+    /// The main macro we generate, its name and parameters.
+    pub core:       Core,
+    /// This specifies a generator for the list of x-macros that are
+    /// picked depending on the argument count.
+    pub generator:  Vec<Generator>,
+}
+
+//
+#[derive(Serialize, Deserialize, Debug, Clone)]
+enum NonRepeatCompilationPart {
+    Raw(String),
+    Key(String)
+}
+
+enum NonRepeatCompilingState {
+    Copying(String),
+    SigilFound,
+    CopyingKey(String),
+}
+
+fn attempt_string_to_compilation_parts_conversion(
+    s: String
+) -> Result<Vec<NonRepeatCompilationPart>, Error> {
+
+    let mut name_parts: Vec<NonRepeatCompilationPart> = vec![];
+    let mut state = NonRepeatCompilingState::Copying(String::new());
+
+    for ch in s.chars() {
+
+        match state {
+
+            NonRepeatCompilingState::Copying(ref mut buffer) => {
+                match ch {
+                    GLOBAL_SIGIL => {
+                        name_parts.push(NonRepeatCompilationPart::Raw(buffer.clone()));
+                        state = NonRepeatCompilingState::SigilFound;
+                    }
+                    _ => buffer.push(ch)
+                }
+            }
+            NonRepeatCompilingState::SigilFound => {
+                match ch {
+                    KEY_OPEN_DELIMITER => {
+                        state = NonRepeatCompilingState::CopyingKey(String::new());
+                    }
+                    _ => ()
+                }
+            }
+            NonRepeatCompilingState::CopyingKey(ref mut buffer_key) => {
+                match ch {
+                    KEY_CLOSE_DELIMITER => {
+                        name_parts.push(NonRepeatCompilationPart::Key(buffer_key.clone()));
+                        state = NonRepeatCompilingState::Copying(String::new());
+                    }
+                    _ => buffer_key.push(ch)
+                }
+            }
+        }
+    }
+
+    match state {
+        NonRepeatCompilingState::Copying(buffer) => {
+            name_parts.push(NonRepeatCompilationPart::Raw(buffer))
+        }
+        NonRepeatCompilingState::SigilFound |
+        NonRepeatCompilingState::CopyingKey(_) => {
+            return Err(Error::KeyCompilation { key: key.to_owned(), name: raw_name.to_owned(), 
+                message: "unkn".to_owned() })
+        }
+    }
+
+    Ok(name_parts)
+
+}
+
+fn attempt_name_compilation(
+    key:         &str,
+    raw_name:    &str,
+    tagged_name: &str,
+    keys:        &HashMap<String, PreprocessableString>
+) -> Result<PreprocessableString, Error> {
+
+    let mut name_parts: Vec<NonRepeatCompilationPart> = vec![];
+    let mut state = NonRepeatCompilingState::Copying(String::new());
+
+    for ch in tagged_name.chars() {
+
+        match state {
+
+            NonRepeatCompilingState::Copying(ref mut buffer) => {
+                match ch {
+                    GLOBAL_SIGIL => {
+                        name_parts.push(NonRepeatCompilationPart::Raw(buffer.clone()));
+                        state = NonRepeatCompilingState::SigilFound;
+                    }
+                    _ => buffer.push(ch)
+                }
+            }
+            NonRepeatCompilingState::SigilFound => {
+                match ch {
+                    KEY_OPEN_DELIMITER => {
+                        state = NonRepeatCompilingState::CopyingKey(String::new());
+                    }
+                    _ => ()
+                }
+            }
+            NonRepeatCompilingState::CopyingKey(ref mut buffer_key) => {
+                match ch {
+                    KEY_CLOSE_DELIMITER => {
+                        name_parts.push(NonRepeatCompilationPart::Key(buffer_key.clone()));
+                        state = NonRepeatCompilingState::Copying(String::new());
+                    }
+                    _ => buffer_key.push(ch)
+                }
+            }
+        }
+    }
+
+    match state {
+        NonRepeatCompilingState::Copying(buffer) => {
+            name_parts.push(NonRepeatCompilationPart::Raw(buffer))
+        }
+        NonRepeatCompilingState::SigilFound |
+        NonRepeatCompilingState::CopyingKey(_) => {
+            return Err(Error::KeyCompilation { key: key.to_owned(), name: raw_name.to_owned(), 
+                message: "unfinised key reference".to_owned() })
+        }
+    }
+
+    let mut compiled_name = String::new();
+    for part in name_parts {
+
+        match part {
+            NonRepeatCompilationPart::Raw(raw) => {
+                compiled_name.push_str(&raw);
+            }
+            NonRepeatCompilationPart::Key(external_key) => {
+                let Some(external_name) =  keys.get(&external_key) else {
+                    return Err(Error::KeyCompilation { key: key.to_owned(), name: raw_name.to_owned(), 
+                        message: format!("failed to compile key, external key `{external_key}` was not found.") })
+                };
+                match external_name {
+                    PreprocessableString::NotPreprocessed(_) => {
+                        return Ok(PreprocessableString::NotPreprocessed(PreprocessableName::default()))
+                    }
+                    PreprocessableString::Preprocessed(external_compiled_name) => {
+                        compiled_name.push_str(&external_compiled_name)
+                    }
+                }
+            }
+        }
+
+    }
+
+    return Ok(PreprocessableString::Preprocessed(compiled_name))
+
+
+
+}
+
+/// Compiler for the keys you can crate with 
+/// 
+fn compile_names(
+    common_keys: &CommonKeyable, 
+    mut keys: HashMap<String, PreprocessableString>
+) -> Result<HashMap<String, PreprocessableString>, Error> {
+
+    log::debug!("Starting to compile keys.");
+
+    let mut left = keys.len();
+    while left != 0 {
+
+        let mut now_left: usize = 0;
+        for (key, name) in keys.clone().iter() {
+            
+            let uncompiled_name = match name {
+                PreprocessableString::Preprocessed(_) => {
+                    log::trace!("{}", 
+                        format!("Key `{key}` with name `{:?}` is already compiled.", name)
+                        .dimmed().strikethrough()
+                    );
+                    continue
+                }
+                PreprocessableString::NotPreprocessed(uncompiled) => uncompiled
+            };
+
+            log::trace!("{}", 
+                format!("Attempting to compile key `{key}` with name `{:?}`.", name)
+                .dimmed()
+            );
+
+            let name_w_tags: StringWithTags = match uncompiled_name {
+                PreprocessableName::Raw(raw) => {
+                    StringWithTags {tags: vec![], string: raw.to_owned()}
+                }
+                PreprocessableName::Tagged(tagged) => {
+                    tagged.to_owned()
+                }
+            };
+
+            let raw_name = name_w_tags.string.to_owned();
+            let tagged_name = name_w_tags.apply_tags(common_keys);
+            match attempt_name_compilation(&key, &raw_name, &tagged_name, &keys)? {
+                PreprocessableString::Preprocessed(compiled) => {
+                    log::trace!("{}",
+                        format!("Key was compiled successfully -> key `{key}` with name `{:?}`.", compiled)
+                        .cyan().dimmed()
+                    );
+                    keys.insert(key.to_owned(), PreprocessableString::Preprocessed(compiled));
+                }
+                PreprocessableString::NotPreprocessed(_) => {
+                    log::trace!("{}",
+                        format!("Key was not compiled successfully as it has dependencies that are not compiled themselves.")
+                        .truecolor(255, 165, 0).dimmed()
+                    );
+                    now_left += 1;
+                    continue;
+                }
+            }
+                    
+        }
+
+
+        if now_left >= left {
+            let key_names: Vec<(String, PreprocessableName)> = keys
+                .clone()
+                .into_iter()
+                .filter_map(|(k, v)| {
+                    match v {
+                        PreprocessableString::NotPreprocessed(uncompiled_name) => Some((k, uncompiled_name)),
+                        PreprocessableString::Preprocessed(_) => None
+                    }
+                })
+                .collect();
+            return Err(Error::KeyMutualReferencing { key_names })
+        }
+
+        left = now_left;
+        log::trace!("{left} keys left to compile.")
+
+    }
+
+    Ok(keys)
+
+} 
+    
+impl Config {
+
+    
+    
+    pub fn load(path: &Path) -> Result<Self, Error>{
+        
+        log::debug!("Starting to load config.");
+
+        let file_contents = std::fs::read_to_string(path)
+            .map_err(|fs_err| Error::IO { 
+                file: path.to_owned(),
+                message: fs_err.to_string() 
+            })?;
+
+        log::debug!("Loaded file into memory.");
+
+        toml::from_str(&file_contents)
+            .map_err(|toml_err| Error::TOML { 
+                file: path.to_owned(),
+                message: toml_err.message().to_owned(), 
+                line: if toml_err.span().is_some() {
+                    let offset_start = toml_err.span().unwrap().start;
+                    let offset_end   = toml_err.span().unwrap().end;
+                    let line_start   = file_contents[..offset_start].lines().count();
+                    let line_end     = file_contents[..offset_end].lines().count();
+                    Some((line_start, line_end))
+                } else {
+                    None
+                }
+            })
+
+    }
+
+    pub fn compile(self) -> Result<Self, Error> {
+
+        log::debug!("Starting to compile the config.");
+
+        let mut keys: HashMap<String, PreprocessableString> = HashMap::new();
+
+        // Vrijednosti iz CommonKeyable mogu se pojaviti kao ključevi unutar
+        // imena.
+        serde_json::to_value(&self.common.keyable)
+            .map_err(|_| Error::KeySerialization { message: "Failed to serialize keyable common values.".to_owned() })?
+            .as_object()
+            .ok_or_else(|| Error::KeySerialization { message: "Failed to create object from serialized keyable common values.".to_owned() })?
+            .clone()
+            .into_iter()
+            .for_each(|(k, v)| {
+                if let serde_json::Value::String(s) = v {
+                    // Common varijable su uvijek čiste od kljuceva unutar sebe
+                    // te ih mozemo odma kompajlirat.
+                    keys.insert(k, PreprocessableString::Preprocessed(s));
+                }
+            });
+
+        let common_keys = self.common.keyable;   
+
+        if let Some(preamble) = self.preamble.clone() {
+            if let Some(preamble_keys) = preamble.keys.clone() {
+                for key in preamble_keys {
+                    keys.insert(key.key, key.name);
+                }
+            }
+        }
+
+        if let Some(definitions) = self.definition.clone() {
+            for definition in definitions {
+                keys.insert(definition.key,definition.name);
+            }
+        }
+
+        log::debug!("Loaded all uncompiled keys name pairs into memory.");
+        log::debug!("Compiling key name pairs...");
+
+        let compiled_key_name_pairs = compile_names(&common_keys, keys)?;
+
+        log::debug!("Compiled key name pairs!");
+        log::trace!("List of compiled key name pairs: {:#?}", compiled_key_name_pairs);
+
+        unimplemented!()
+
+    }
+
+}

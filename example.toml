@@ -1,0 +1,57 @@
+[common]
+output  = "ya_ecgen.h"
+prefix  = "YA_ECGEN_"
+repeats = 10
+
+[preamble]
+raw = """
+#define ${prefix}ERROR_COOL(message) static_assert(false, message)
+"""
+
+keys = [
+    {key = "emsg_print_cool", name = "ERROR"},
+    # or
+    {key = "emsg_print_cool", name = {tags = ["NO_PREFIX"], string = "${prefix}ERROR"}}
+]
+
+[[definition]]
+key        = "emsg_print"
+name       = "ERROR"
+parameters = ["message"] # instead of raw.
+expansion  = "static_assert(false, message)"
+
+[[definition]] 
+key       = "emsg_unparity"
+name      = "ERROR_MESSAGE_UNPARITY"
+expansion = "\"${prefix}: [Argument unparity] Error code doesn't have its message pair.\""
+
+[[definition]] 
+key       = "emsg_no_args"
+name      = "ERROR_MESSAGE_NO_ARGS"
+expansion = "\"${prefix}: [No members] No member was specified for this enum type.\""
+
+[core]
+name = {tags = ["NO_PREFIX"], name = "YA_ECGEN"}
+args = [
+    {named  = "lowercase_name"},
+    {named  = "UPPERCASE_NAME"},
+    {varadict = 2}
+]
+
+[[generator]]
+preamble  = "enum ya_ ## lowercase_name ## _error_codes {"
+repeat    = "YA_ ## UPPERCASE_NAME ## $(0)$[,]"
+postamble = "}"
+
+[generator.fallbacks]
+unparity = "${emsg_print}(${emsg_unparity})"
+empty    = "${emsg_print}(${emsg_no_args})"
+
+[[generator]]
+preamble  = "const char ya_ ## lowercase_name ## conversion_table[] = "
+repeat    = "[YA_ ## UPPERCASE_NAME ## $(0)] = $(1)$[,]"
+postamble = ";"
+
+[generator.fallbacks]
+unparity = "${emsg_print}(${emsg_unparity})"
+empty    = "${emsg_print}(${emsg_no_args})"
