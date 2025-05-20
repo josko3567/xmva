@@ -33,12 +33,9 @@ mod config;
 mod sigil;
 mod preprocessor;
 
-
-use std::process::exit;
 use clap::Parser;
 use config::Config;
 use args::Arguments;
-
 
 fn main() {
 
@@ -73,5 +70,8 @@ fn main() {
             panic!()
         }
     }
+
+    log::info!("Finished preprocessing.")
+
     
 }

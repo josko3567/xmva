@@ -5,12 +5,12 @@ repeats = 10
 
 [preamble]
 raw = """
-#define ${prefix}ERROR_COOL(message) static_assert(false, message)
+#define @{prefix}ERROR_COOL(message) static_assert(false, message)
 """
 
 keys = [
     # or
-    {key = "emsg_print_cool", name = {tags = ["NO_PREFIX"], string = "ERROR"}}
+    {key = "emsg_print_cool", name = {tags = ["NO_PREFIX"], string = "\\@{prefix}ERROR"}}
 ]
 
 [[definition]]
@@ -22,12 +22,12 @@ expansion  = "static_assert(false, message)"
 [[definition]] 
 key       = "emsg_unparity"
 name      = "ERROR_MESSAGE_UNPARITY"
-expansion = "\"${prefix}: [Argument unparity] Error code doesn't have its message pair.\""
+expansion = "\"@{prefix}: [Argument unparity] Error code doesn't have its message pair.\""
 
 [[definition]] 
 key       = "emsg_no_args"
 name      = "ERROR_MESSAGE_NO_ARGS"
-expansion = "\"${prefix}: [No members] No member was specified for this enum type.\""
+expansion = "\"@{prefix}: [No members] No member was specified for this enum type.\""
 
 [core]
 name = {tags = ["NO_PREFIX"], string = "YA_ECGEN"}
@@ -43,8 +43,8 @@ repeat    = "YA_ ## UPPERCASE_NAME ## $(0)$[,]"
 postamble = "}"
 
 [generator.fallbacks]
-unparity = "${emsg_print}(${emsg_unparity})"
-empty    = "${emsg_print}(${emsg_no_args})"
+unparity = "@{emsg_print}(@{emsg_unparity})"
+empty    = "@{emsg_print}(@{emsg_no_args})"
 
 [[generator]]
 preamble  = "const char ya_ ## lowercase_name ## conversion_table[] = "
@@ -52,5 +52,5 @@ repeat    = "[YA_ ## UPPERCASE_NAME ## $(0)] = $(1)$[,]"
 postamble = ";"
 
 [generator.fallbacks]
-unparity = "${emsg_print}(${emsg_unparity})"
-empty    = "${emsg_print}(${emsg_no_args})"
+unparity = "@{emsg_print}(@{emsg_unparity})"
+empty    = "@{emsg_print}(@{emsg_no_args})"

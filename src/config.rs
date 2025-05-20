@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use strum::{IntoEnumIterator, EnumProperty, EnumIter};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::preprocessor::Preprocessable;
+use crate::preprocessor::{Preprocessable, PreprocessableName, PreprocessableString};
 
 #[derive(Debug)]
 pub enum Error {
@@ -56,7 +56,8 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Common configuration values that can be used as keys in `name`s.
+/// Common configuration values that can be referenced with their name
+/// being the key.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CommonKeyable {
     pub prefix: String
@@ -193,31 +194,12 @@ impl StringWithTags {
 
 }
 
-/// A name of... most likely definition created by this program
-/// or already existing in some other file.
-/// 
-/// Why the `Preprocessable` suffix?
-/// --------------------------------
-/// 
-/// Because like the C compiler, my compiler does preprocessing first
-/// and then compiling.
-/// 
-/// Preprocessing is done with `key/name` pairs.
-/// 
-/// These pairs can be defined either in the `[preamble.key]`
-/// section or in a `[preamble.definition]` entry.
-/// 
-/// The `key` in this pair can be used inside of other values in the 
-/// config file to reference the `name` the `key` represents. 
-/// But these `keys` can be used inside of a `name` aswell.
-/// 
-/// The reason the `name` isn't stored in a string is because
-/// names can have [`Tag`]s that go along side them.
-/// 
-/// Due to that we have to differentiate 2 `names`, one with
-/// [Tag]s and one without [Tag]s.
-/// 
-/// Why use `keys`? Read the [Definition] docs. 
+/// A name of either a [Definition] or a [Key].
+/// Names can come included with [Tag]s to disable or add some [Todo]s
+/// to be done to the name.
+/// In [Definition] they are the name of the definition while in [Key] they
+/// can litteraly refer to anything that this program generates or anything
+/// external (in C).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Name {
@@ -231,23 +213,12 @@ impl Default for Name {
     }
 }
 
-
-
-/// This deserializer flattens [PreprocessableString] which stores
-/// [PreprocessableName] inside of it in [Definition] and [Key].
-/// 
-/// It also sets it automatically as a 
-/// [PreprocessableString::NotPreprocessed].
+/// This deserializer flattens [PreprocessableName] 
+/// and automatically stores the [Name] inside of
+/// [Preprocessable::NotPreprocessed].
 fn preprocessable_name_deserializer<'de, D>(
     deserializer: D
-) -> Result< 
-        Arc<
-            RwLock<
-                Preprocessable<Name>
-            >
-        >, 
-        D::Error
-    >
+) -> Result<PreprocessableName, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -257,17 +228,10 @@ where
 
 /// This deserializer flattens [PreprocessableString] 
 /// and automatically stores the [String] inside of
-/// [PreprocessableString::NotPreprocessed].
+/// [Preprocessable::NotPreprocessed].
 fn preprocessable_string_deserializer<'de, D>(
     deserializer: D
-) -> Result<
-        Arc<
-            RwLock<
-                Preprocessable<String>
-            >
-        >, 
-        D::Error
-    >
+) -> Result<PreprocessableString, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -278,19 +242,15 @@ where
 /// Same as [preprocessable_string_deserializer] but with a [Option].
 fn preprocessable_option_string_deserializer<'de, D>(
     deserializer: D
-) -> Result<
-        Arc<
-            RwLock<
-                Option<Preprocessable<String>>
-            >
-        >,
-        D::Error
-    >
+) -> Result<Option<PreprocessableString>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let optional_unprocessed_string = Option::<String>::deserialize(deserializer)?;
-    Ok(Arc::new(RwLock::new(optional_unprocessed_string.map(Preprocessable::NotPreprocessed))))
+    match optional_unprocessed_string {
+        Some(string) => Ok(Some(Arc::new(RwLock::new(Preprocessable::NotPreprocessed(string))))),
+        None => Ok(None)
+    }
 }
 
 /// A `#define` from C.
@@ -322,26 +282,26 @@ where
 pub struct Definition {
     pub key:        String,
     #[serde(deserialize_with = "preprocessable_name_deserializer")]
-    pub name:       Arc<RwLock<Preprocessable<Name>>>,
+    pub name:       PreprocessableName,
     pub parameters: Option<Vec<String>>,
     #[serde(deserialize_with = "preprocessable_string_deserializer")]
-    pub expansion:  Arc<RwLock<Preprocessable<String>>>,
+    pub expansion:  PreprocessableString,
 }
 
 /// Keys that might reference anything from another C file or the
-/// [Preamble::raw].
+/// the code generated with this executable and a config.
 #[derive(Deserialize, Debug, Clone)]
 pub struct Key {
     pub key:  String,
     #[serde(deserialize_with = "preprocessable_name_deserializer")]
-    pub name: Arc<RwLock<Preprocessable<Name>>>
+    pub name: PreprocessableName
 }
 
 /// Custom preamble that is inserted as is (first preprocessed tho).
 #[derive(Deserialize, Debug, Clone)]
 pub struct Preamble {
     #[serde(deserialize_with = "preprocessable_option_string_deserializer")]
-    pub raw:  Arc<RwLock<Option<Preprocessable<String>>>>,
+    pub raw:  Option<PreprocessableString>,
     pub keys: Option<Vec<Key>>,
 }
 
@@ -352,11 +312,11 @@ pub struct Fallbacks {
     #[serde(deserialize_with = "preprocessable_string_deserializer")]
     /// What to do when the varadict argument count is not a multiple
     /// of [Paramaters::Varadict] in [Core::args].
-    pub unparity: Arc<RwLock<Preprocessable<String>>>,
+    pub unparity: PreprocessableString,
 
     #[serde(deserialize_with = "preprocessable_string_deserializer")]
     /// What to do when the varadict argument count is 0?
-    pub empty: Arc<RwLock<Preprocessable<String>>>,
+    pub empty: PreprocessableString,
 }
 
 /// In this XMVA macro i've invisioned there is but one catch,
@@ -375,7 +335,7 @@ pub struct Generator {
     
     /// What to write before the repeat part.
     #[serde(deserialize_with = "preprocessable_string_deserializer")]
-    pub preamble: Arc<RwLock<Preprocessable<String>>>,
+    pub preamble: PreprocessableString,
     
     /// THE repeat part.
     /// 
@@ -413,11 +373,11 @@ pub struct Generator {
     /// repeat = "[${prefix} ## $(0)] = $(1)$[,]"
     /// ```
     #[serde(deserialize_with = "preprocessable_string_deserializer")]
-    pub repeat: Arc<RwLock<Preprocessable<String>>>,
+    pub repeat: PreprocessableString,
 
     // What to write after the repeat part.
     #[serde(deserialize_with = "preprocessable_string_deserializer")]
-    pub postamble: Arc<RwLock<Preprocessable<String>>>
+    pub postamble: PreprocessableString
 }
 
 /// Types of parameters we pass to our X-Macro.

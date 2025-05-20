@@ -4,7 +4,7 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use strum::EnumProperty;
 
-use crate::{config::{CommonKeyable, Config, Name, StringWithTags}, sigil::Sigil};
+use crate::{config::{CommonKeyable, Config, Name, StringWithTags}, sigil::PreprocessorSigil};
 
 #[derive(Debug)]
 pub enum ErrorKind {
@@ -12,8 +12,8 @@ pub enum ErrorKind {
     IllegalSymbol,
     Serialization,
     PoisonedLock,
-    NonexistantReference,
-    MutualRefrences,
+    NonExistantReference,
+    MutualReferences,
     DuplicateKey
 }
 
@@ -37,7 +37,11 @@ impl std::error::Error for Error {}
 /// object or a [Preprocessable::Preprocessed] [String].
 /// 
 /// Whats important is that whatever [Preprocessable::NotPreprocessed] is
-/// we can convert it into parts 
+/// we can convert it into [PreprocessorToken]s since every type has to implement
+/// [Preprocess].
+/// 
+/// When loading the config, all preprocessable types start as 
+/// [Preprocessable::NotPreprocessed] except the values from [CommonKeyable].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Preprocessable<T>
 where T: Preprocess
@@ -62,8 +66,20 @@ impl Default for Preprocessable<String> {
 
 }
 
+/// [Preprocess] is implemented on every type that can be preprocessed
+/// and that are a part of [Preprocessable]. 
 pub trait Preprocess {
 
+    /// Convert the type into a [Vec]<[PreprocessorToken]>,
+    /// used since we have key references in preprocessable types
+    /// that have to be first detected as a token (here) and then
+    /// read from the table of keys.
+    ///
+    /// Init
+    /// ----
+    /// Types from [Preprocessable] are not initialized (like [StringWithTags])
+    /// and here they are meant to be initialized before they are processed
+    /// into tokens.
     fn into_preprocessor_tokens(
         &self,
         keys: &CommonKeyable
@@ -85,6 +101,7 @@ impl Preprocess for String {
 } 
 
 impl Preprocess for Name {
+
     fn into_preprocessor_tokens(
         &self,
         keys: &CommonKeyable
@@ -94,15 +111,20 @@ impl Preprocess for Name {
             Self::Raw(s) => StringWithTags{tags: vec![], string: s.clone()},
             Self::Tagged(swt) => swt.clone()
         };
-
+        
+        // init
         let s = &s_w_tags.apply_tags(keys);
 
         preprocessor_string_tokenizer(s)
         
     }
+
 }
 
-
+/// Preprocessor tokens that will be processed and combined together intož
+/// a finished preprocessed string.
+/// `Raw` hold a raw string that has no special characteristics.
+/// `Key` holds a string that a name of a key. 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum PreprocessorToken {
     Raw(String),
@@ -112,10 +134,14 @@ pub enum PreprocessorToken {
 pub enum PreprocessorTokenizerState {
     Copying(String),
     CopyingKey(String),
-    Skip(Sigil),
     SigilFound,
+    EmbedFound
 }
 
+/// Regular [PreprocessorToken] tokenizer, meant to be run on all [Preprocessable]s.
+/// This also includes the [crate::config::Generator::repeat] [Preprocessable]
+/// but it skips special sigils like [Sigil::CompilerSkipLastOpen]/[Sigil::CompilerSkipLastClose]
+/// and [Sigil::CompilerArgumentRefOpen]/[Sigil::CompilerArgumentRefClose].
 fn preprocessor_string_tokenizer(
     s: &str
 ) -> Result<Vec<PreprocessorToken>, Error> {
@@ -129,31 +155,38 @@ fn preprocessor_string_tokenizer(
         match state {
 
             PreprocessorTokenizerState::Copying(ref mut buffer) => {
-                match Sigil::from(ch) {
-                    Sigil::TokenStart => {
+                match PreprocessorSigil::from(ch) {
+                    PreprocessorSigil::TokenStart => {
                         parts.push(PreprocessorToken::Raw(buffer.clone()));
                         state = PreprocessorTokenizerState::SigilFound;
                     }
-                    Sigil::PreprocessorKeyRefOpen |
-                    Sigil::PreprocessorKeyRefClose |
-                    Sigil::CompilerSkipLastOpen |
-                    Sigil::CompilerSkipLastClose |
-                    Sigil::CompilerArgumentRefOpen |
-                    Sigil::CompilerArgumentRefClose => {
-                        return Err(Error{
-                            kind: ErrorKind::IllegalSymbol,
-                            message: format!(
-                                "Illegal symbol '{}' in '{}' cannot appear before the '{:?}' symbol '{:?}'",
-                                ch, s, Sigil::TokenStart, Sigil::TokenStart.get_str("ch")
-                            )
-                        })
+                    PreprocessorSigil::TokenEmbed => {
+                        parts.push(PreprocessorToken::Raw(buffer.clone()));
+                        state = PreprocessorTokenizerState::EmbedFound;
                     }
-                    Sigil::Non(ch) => buffer.push(ch)
+                    PreprocessorSigil::KeyRefOpen |
+                    PreprocessorSigil::KeyRefClose |
+                    PreprocessorSigil::Non(_) => buffer.push(ch)
+                }
+            }
+            PreprocessorTokenizerState::EmbedFound => {
+                match PreprocessorSigil::from(ch) {
+                    PreprocessorSigil::TokenStart => {
+                        state = PreprocessorTokenizerState::Copying(
+                            PreprocessorSigil::TokenStart.get_str("ch").unwrap().to_owned()
+                        )
+                    }
+                    _ => {
+                        state = PreprocessorTokenizerState::Copying(
+                            PreprocessorSigil::TokenEmbed.get_str("ch").unwrap().to_owned()
+                            + &ch.to_string()
+                        )
+                    }
                 }
             }
             PreprocessorTokenizerState::SigilFound => {
-                match Sigil::from(ch) {  
-                    Sigil::TokenStart => {
+                match PreprocessorSigil::from(ch) {  
+                    PreprocessorSigil::TokenStart => {
                         return Err(Error{
                             kind: ErrorKind::IllegalSymbol,
                             message: format!(
@@ -161,59 +194,35 @@ fn preprocessor_string_tokenizer(
                             )
                         })
                     }
-                    Sigil::PreprocessorKeyRefOpen => {
+                    PreprocessorSigil::KeyRefOpen => {
                         state = PreprocessorTokenizerState::CopyingKey(String::new())
                     }
-                    Sigil::CompilerSkipLastOpen => {
-                        state = PreprocessorTokenizerState::Skip(Sigil::CompilerSkipLastClose)
-                    }
-                    Sigil::CompilerArgumentRefOpen => {
-                        state = PreprocessorTokenizerState::Skip(Sigil::CompilerArgumentRefClose)
-                    }
-                    Sigil::PreprocessorKeyRefClose |
-                    Sigil::CompilerSkipLastClose |
-                    Sigil::CompilerArgumentRefClose |
-                    Sigil::Non(_)=> {
+                    PreprocessorSigil::KeyRefClose |
+                    PreprocessorSigil::TokenEmbed |
+                    PreprocessorSigil::Non(_)=> {
                         return Err(Error {
                             kind: ErrorKind::IllegalSymbol,
                             message: format!(
                                 "Illegal character '{}' in '{}' after '{:?}' symbol '{:?}' ", 
-                                ch, s, Sigil::TokenStart, Sigil::TokenStart.get_str("ch")
+                                ch, s, PreprocessorSigil::TokenStart, PreprocessorSigil::TokenStart.get_str("ch")
                             )
                         })
                     }
                 }
-            }
-            PreprocessorTokenizerState::Skip(expected_sigil) => {
-                if expected_sigil == Sigil::from(ch) {
-                    state = PreprocessorTokenizerState::Copying(String::new())
-                }
-                match Sigil::from(ch) {
-                    Sigil::Non(_) => (),
-                    _ => {
-                        return Err(Error {
-                            kind: ErrorKind::IllegalSymbol,
-                            message: format!(
-                                "Illegal character '{}' in '{}', expected a '{:?}' symbol '{:?}'", 
-                                ch, s, expected_sigil, expected_sigil.get_str("ch")
-                            )
-                        })
-                    }
-                }   
             }
             PreprocessorTokenizerState::CopyingKey(ref mut buffer_key) => {
-                match Sigil::from(ch) {
-                    Sigil::PreprocessorKeyRefClose => {
+                match PreprocessorSigil::from(ch) {
+                    PreprocessorSigil::KeyRefClose => {
                         parts.push(PreprocessorToken::Key(buffer_key.clone()));
                         state = PreprocessorTokenizerState::Copying(String::new());
                     }
-                    Sigil::Non(ch) => buffer_key.push(ch),
+                    PreprocessorSigil::Non(ch) => buffer_key.push(ch),
                     _ => {
                         return Err(Error {
                             kind: ErrorKind::IllegalSymbol,
                             message: format!(
                                 "Illegal character '{}' in '{}', expected a '{:?}' symbol '{:?}'", 
-                                ch, s, Sigil::PreprocessorKeyRefClose, Sigil::PreprocessorKeyRefClose.get_str("ch")
+                                ch, s, PreprocessorSigil::KeyRefClose, PreprocessorSigil::KeyRefClose.get_str("ch")
                             )
                         })
                     }
@@ -226,21 +235,15 @@ fn preprocessor_string_tokenizer(
         PreprocessorTokenizerState::Copying(buffer) => {
             parts.push(PreprocessorToken::Raw(buffer))
         }
+        PreprocessorTokenizerState::EmbedFound => {
+            parts.push(PreprocessorToken::Raw(PreprocessorSigil::TokenEmbed.get_str("ch").unwrap().to_owned()))
+        }
         PreprocessorTokenizerState::SigilFound => {
             return Err(Error {
                 kind: ErrorKind::InvalidToken,
                 message: format!(
                     "'{:?}' symbol '{:?}' found with no body to go along side it in '{}'", 
-                    Sigil::TokenStart, Sigil::TokenStart.get_str("ch"), s
-                )
-            })
-        }
-        PreprocessorTokenizerState::Skip(expected_sigil) => {
-            return Err(Error {
-                kind: ErrorKind::InvalidToken,
-                message: format!(
-                    "Unfinished token in '{}', that was supposed to end with a '{:?}' symbol '{:?}'", 
-                    s, expected_sigil.clone(), expected_sigil.get_str("ch")
+                    PreprocessorSigil::TokenStart, PreprocessorSigil::TokenStart.get_str("ch"), s
                 )
             })
         }
@@ -257,13 +260,32 @@ fn preprocessor_string_tokenizer(
 
 }
 
-/// Simple wrapper to hold all Preprocessable types.
+/// Wrapper for [Preprocessable]<[Name]>, see [AnyPreprocessable] and
+/// [Preprocessable] for more info. 
+pub type PreprocessableName   = Arc<RwLock<Preprocessable<Name>>>;
+
+/// Wrapper for [Preprocessable]<[String]>, see [AnyPreprocessable] and
+/// [Preprocessable] for more info. 
+pub type PreprocessableString = Arc<RwLock<Preprocessable<String>>>;
+
+/// Simple wrapper to hold all [Preprocessable] types.
+/// All variants are first wrapped with a [Arc] [RwLock].
+/// 
+/// Why [Arc] & [RwLock]?
+/// ---------------------
+/// Very simply put whenever we attempt to preprocess them instead of trying 
+/// to find the variable that the [AnyPreprocessable] came from, we instead
+/// write directly into the variable and the change will be reflected inside
+/// of the [Config] itself. 
 #[derive(Debug, Clone)]
 pub enum AnyPreprocessable {
-    Name(Arc<RwLock<Preprocessable<Name>>>),
-    String(Arc<RwLock<Preprocessable<String>>>)
+    Name(PreprocessableName),
+    String(PreprocessableString)
 }
 
+/// Attempt to assemble a [Vec] of [PreprocessorToken].
+/// `keys` are a set of key name pairs from the [Config] and they are used for
+/// processing [PreprocessorToken::Key] tokens.
 pub fn preprocessor_token_assembly_attempt(
     tokens: Vec<PreprocessorToken>,
     keys: &HashMap<String, AnyPreprocessable>
@@ -280,7 +302,7 @@ pub fn preprocessor_token_assembly_attempt(
             PreprocessorToken::Key(key) => {
                 let Some(preprocessable) = keys.get(key) else {
                     return Err(Error { 
-                        kind: ErrorKind::NonexistantReference, 
+                        kind: ErrorKind::NonExistantReference, 
                         message: format!(
                             "string was seperated into tokens \n{:?}\nbut token {:?} cannot be preprocessed",
                             tokens, token
@@ -330,6 +352,15 @@ pub fn preprocessor_token_assembly_attempt(
 
 }
 
+/// Preprocess key name pairs from `keys` and finialize them.
+/// 
+/// Since the unpreprocessed key name pairs are stored in a [AnyPreprocessable] 
+/// they can be written to and the changes will be reflected in the [Config] they 
+/// came from.
+/// 
+/// Which is also the reason we return a `Ok(())` meaning we successfully
+/// preprocessed all the key name pairs from `keys` and written the results 
+/// back into the [AnyPreprocessable].
 pub fn preprocess_key_name_pairs(
     keys: &HashMap<String, AnyPreprocessable>,
     common_keys: &CommonKeyable
@@ -447,13 +478,11 @@ pub fn preprocess_key_name_pairs(
                             }
                         }
                         AnyPreprocessable::String(_) => None
-                        // Preprocessable::NotPreprocessed(uncompiled_name) => Some((k, uncompiled_name)),
-                        // Preprocessable::Preprocessed(_) => None
                     }
                 })
                 .collect();
             return Err(Error {
-                kind: ErrorKind::MutualRefrences,
+                kind: ErrorKind::MutualReferences,
                 message: format!(
                     "the following keys could not be preprocessed, they probably have mutual references or reference themselves: \n{:#?}",
                     key_names
@@ -462,30 +491,111 @@ pub fn preprocess_key_name_pairs(
         }
 
         left = *guard_left;
-        log::trace!("{left} keys left to preprocess")
+        log::trace!("{}", format!("{left} keys left to preprocess.").dimmed())
 
     }
 
     Ok(())
 }
+
+pub fn preprocess_strings(
+    preprocessable_strings: Vec<PreprocessableString>,
+    keys: &HashMap<String, AnyPreprocessable>,
+    common_keys: &CommonKeyable
+) -> Result<(), Error> {
+    
+    for ps in preprocessable_strings {
+
+        let ps_read = ps.read() 
+            .map_err(|err| Error {
+                kind: ErrorKind::PoisonedLock,
+                message: err.to_string() 
+            })?;
+
+        let tokens = match &*ps_read {
+            Preprocessable::NotPreprocessed(s) => {
+                s.into_preprocessor_tokens(common_keys)?
+            }
+            Preprocessable::Preprocessed(_) => continue
+        };
+
+        let preprocessed = match preprocessor_token_assembly_attempt(tokens, keys) {
+            Ok(Some(s)) => s,
+            Ok(None) => unreachable!(),
+            Err(err) => return Err(err)
+        };
+
+        log::trace!("{}",
+            format!("Preprocessed string from '{:?}' -> '{}'", ps_read, preprocessed)
+            .dimmed()
+        );
+
+        drop(ps_read);
+
+        let mut ps_write = ps.write() 
+            .map_err(|err| Error {
+                kind: ErrorKind::PoisonedLock,
+                message: err.to_string() 
+            })?;
+        
+        *ps_write = Preprocessable::Preprocessed(preprocessed);
+
+    
+    
+    }
+
+    Ok(())
+}
+
     
 impl Config {
 
-    /// Loads all key name pairs like all the [config::Preamble] -> Vec<[config::Key]>
-    /// and Vec<[config::Definition]> key name pairs.
+    /// Loads all preprocessable strings from the config that are not
+    /// key name pairs.
+    fn load_preprocessable_strings(&self) -> Vec<PreprocessableString> {
+
+        let mut preprocessables: Vec<PreprocessableString> = vec![];
+
+        if let Some(preamble) = &self.preamble {
+            if let Some(raw) = &preamble.raw {
+                preprocessables.push(raw.clone());
+            }
+        }
+
+        if let Some(definitions) = &self.definition {
+            for def in definitions {
+                preprocessables.push(def.expansion.clone());
+            }
+        }
+
+        for generator in &self.generator {
+            preprocessables.push(generator.preamble.clone());
+            preprocessables.push(generator.repeat.clone());
+            preprocessables.push(generator.postamble.clone());
+            preprocessables.push(generator.fallbacks.unparity.clone());
+            preprocessables.push(generator.fallbacks.empty.clone());
+        }
+
+        preprocessables
+
+    }
+
+    /// Loads all key name pairs like all the [crate::config::Preamble] -> Vec<[crate::config::Key]>
+    /// and Vec<[crate::config::Definition]> key name pairs.
     /// 
     /// Important
     /// ---------
-    /// This also loads key name pairs from [config::CommonKeyable] where the `key`
+    /// This also loads key name pairs from [crate::config::CommonKeyable] where the `key`
     /// is the variable name and the `name` is the value inside the variable.
     /// 
     /// This is important to the preprocessing process since we only read keys
-    /// from the hash map that is returned from this function.
+    /// from the hash map that is returned from this function when trying to process
+    /// key references inside of a [Preprocessable].
     /// 
     /// Also worthy of noting, the value of the [HashMap] is [AnyPreprocessable]
     /// which holds a [Arc]<[RwLock]<>> of the name data, meaning that any change
     /// done within the [RwLock] is reflected on the config itself.
-    pub fn load_key_name_pairs(&self) -> Result<HashMap<String, AnyPreprocessable>, Error> {
+    fn load_key_name_pairs(&self) -> Result<HashMap<String, AnyPreprocessable>, Error> {
         let mut keys: HashMap<String, AnyPreprocessable> = HashMap::new();
 
         // Vrijednosti iz CommonKeyable mogu se pojaviti kao ključevi unutar
@@ -556,28 +666,28 @@ impl Config {
             }
         }
 
-
-
         Ok(keys)
 
     }
     
 
-    pub fn preprocess(self) -> Result<Self, Error> {
+    pub fn preprocess(self) -> Result<(), Error> {
 
         log::debug!("Starting to preprocess the config.");
 
         log::debug!("Loading key name pairs...");
         let keys = self.load_key_name_pairs()?;
-        log::debug!("Loaded key name pairs!");
         
         log::debug!("Preprocessing key name pairs...");
         preprocess_key_name_pairs(&keys, &self.common.keyable)?;
-        log::debug!("Preprocessed key name pairs!");
 
-        println!("{:#?}", keys);
+        log::debug!("Loading all preprocessable strings...");
+        let preprocessable_strings = self.load_preprocessable_strings();
 
-        unimplemented!()
+        log::debug!("Preprocessing strings...");
+        preprocess_strings(preprocessable_strings, &keys, &self.common.keyable)?;
+
+        return Ok(())
 
     }
 
