@@ -30,7 +30,8 @@
 
 mod args;
 mod config;
-mod normalize;
+mod sigil;
+mod preprocessor;
 
 
 use std::process::exit;
@@ -58,13 +59,19 @@ fn main() {
         Ok(config) => config,
         Err(err) => {
             eprintln!("{err}"); 
-            exit(1)
+            panic!()
         }
     };
 
     log::info!("Loaded config.");
 
 
-    let _ = config.compile();
+    match config.preprocess() {
+        Ok(_) => (),
+        Err(err) => {
+            eprintln!("{err}"); 
+            panic!()
+        }
+    }
     
 }

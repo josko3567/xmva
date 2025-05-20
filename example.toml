@@ -9,9 +9,8 @@ raw = """
 """
 
 keys = [
-    {key = "emsg_print_cool", name = "ERROR"},
     # or
-    {key = "emsg_print_cool", name = {tags = ["NO_PREFIX"], string = "${prefix}ERROR"}}
+    {key = "emsg_print_cool", name = {tags = ["NO_PREFIX"], string = "ERROR"}}
 ]
 
 [[definition]]
@@ -31,10 +30,10 @@ name      = "ERROR_MESSAGE_NO_ARGS"
 expansion = "\"${prefix}: [No members] No member was specified for this enum type.\""
 
 [core]
-name = {tags = ["NO_PREFIX"], name = "YA_ECGEN"}
+name = {tags = ["NO_PREFIX"], string = "YA_ECGEN"}
 args = [
-    {named  = "lowercase_name"},
-    {named  = "UPPERCASE_NAME"},
+    {named = "lowercase_name"},
+    {named = "UPPERCASE_NAME"},
     {varadict = 2}
 ]
 
