@@ -4,9 +4,14 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use strum::EnumProperty;
 
-use crate::{config::{CommonKeyable, Config, Name, StringWithTags}, sigil::PreprocessorSigil};
+use crate::{
+    config::{
+        Argument, CommonKeyable, Config, Name, StringWithTags
+    }, 
+    sigil::PreprocessorSigil
+};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     InvalidToken,
     IllegalSymbol,
@@ -14,6 +19,7 @@ pub enum ErrorKind {
     PoisonedLock,
     NonExistantReference,
     MutualReferences,
+    EmptyReference,
     DuplicateKey
 }
 
@@ -125,7 +131,7 @@ impl Preprocess for Name {
 /// a finished preprocessed string.
 /// `Raw` hold a raw string that has no special characteristics.
 /// `Key` holds a string that a name of a key. 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum PreprocessorToken {
     Raw(String),
     Key(String)
@@ -135,7 +141,7 @@ pub enum PreprocessorTokenizerState {
     Copying(String),
     CopyingKey(String),
     SigilFound,
-    EmbedFound
+    EmbedFound(String)
 }
 
 /// Regular [PreprocessorToken] tokenizer, meant to be run on all [Preprocessable]s.
@@ -157,30 +163,28 @@ fn preprocessor_string_tokenizer(
             PreprocessorTokenizerState::Copying(ref mut buffer) => {
                 match PreprocessorSigil::from(ch) {
                     PreprocessorSigil::TokenStart => {
-                        parts.push(PreprocessorToken::Raw(buffer.clone()));
+                        if !buffer.is_empty() {
+                            parts.push(PreprocessorToken::Raw(buffer.clone()));
+                        }
                         state = PreprocessorTokenizerState::SigilFound;
                     }
                     PreprocessorSigil::TokenEmbed => {
-                        parts.push(PreprocessorToken::Raw(buffer.clone()));
-                        state = PreprocessorTokenizerState::EmbedFound;
+                        state = PreprocessorTokenizerState::EmbedFound(buffer.clone());
                     }
                     PreprocessorSigil::KeyRefOpen |
                     PreprocessorSigil::KeyRefClose |
                     PreprocessorSigil::Non(_) => buffer.push(ch)
                 }
             }
-            PreprocessorTokenizerState::EmbedFound => {
+            PreprocessorTokenizerState::EmbedFound(ref mut buffer) => {
                 match PreprocessorSigil::from(ch) {
                     PreprocessorSigil::TokenStart => {
-                        state = PreprocessorTokenizerState::Copying(
-                            PreprocessorSigil::TokenStart.get_str("ch").unwrap().to_owned()
-                        )
+                        *buffer = buffer.to_owned() + PreprocessorSigil::TokenStart.get_str("ch").unwrap();
+                        state = PreprocessorTokenizerState::Copying(buffer.clone());
                     }
                     _ => {
-                        state = PreprocessorTokenizerState::Copying(
-                            PreprocessorSigil::TokenEmbed.get_str("ch").unwrap().to_owned()
-                            + &ch.to_string()
-                        )
+                        *buffer = buffer.to_owned() + PreprocessorSigil::TokenEmbed.get_str("ch").unwrap() + &ch.to_string();
+                        state = PreprocessorTokenizerState::Copying(buffer.clone());
                     }
                 }
             }
@@ -213,6 +217,17 @@ fn preprocessor_string_tokenizer(
             PreprocessorTokenizerState::CopyingKey(ref mut buffer_key) => {
                 match PreprocessorSigil::from(ch) {
                     PreprocessorSigil::KeyRefClose => {
+                        if buffer_key.is_empty() {
+                            return Err(Error {
+                                kind: ErrorKind::EmptyReference,
+                                message: format!(
+                                    "Empty key reference `{}{}{}` inside of a preprocessable name `{s}`",
+                                    PreprocessorSigil::TokenStart.get_str("ch").unwrap(),
+                                    PreprocessorSigil::KeyRefOpen.get_str("ch").unwrap(),
+                                    PreprocessorSigil::KeyRefClose.get_str("ch").unwrap(),
+                                )
+                            })
+                        }
                         parts.push(PreprocessorToken::Key(buffer_key.clone()));
                         state = PreprocessorTokenizerState::Copying(String::new());
                     }
@@ -233,10 +248,12 @@ fn preprocessor_string_tokenizer(
 
     match state {
         PreprocessorTokenizerState::Copying(buffer) => {
-            parts.push(PreprocessorToken::Raw(buffer))
+            if !buffer.is_empty() {
+                parts.push(PreprocessorToken::Raw(buffer))
+            }
         }
-        PreprocessorTokenizerState::EmbedFound => {
-            parts.push(PreprocessorToken::Raw(PreprocessorSigil::TokenEmbed.get_str("ch").unwrap().to_owned()))
+        PreprocessorTokenizerState::EmbedFound(buffer) => {
+            parts.push(PreprocessorToken::Raw(buffer + PreprocessorSigil::TokenEmbed.get_str("ch").unwrap()))
         }
         PreprocessorTokenizerState::SigilFound => {
             return Err(Error {
@@ -304,7 +321,7 @@ pub fn preprocessor_token_assembly_attempt(
                     return Err(Error { 
                         kind: ErrorKind::NonExistantReference, 
                         message: format!(
-                            "string was seperated into tokens \n{:?}\nbut token {:?} cannot be preprocessed",
+                            "string was seperated into tokens: {:?}... but the token {:?} contains a key that doesn't exist",
                             tokens, token
                         )
                     })
@@ -540,8 +557,6 @@ pub fn preprocess_strings(
         
         *ps_write = Preprocessable::Preprocessed(preprocessed);
 
-    
-    
     }
 
     Ok(())
@@ -565,6 +580,17 @@ impl Config {
         if let Some(definitions) = &self.definition {
             for def in definitions {
                 preprocessables.push(def.expansion.clone());
+            }
+        }
+
+        preprocessables.push(self.core.xmva.clone());
+
+        for arg in self.core.args.iter() {
+            match arg {
+                &Argument::Named(ref named) => {
+                    preprocessables.push(named.name.clone())
+                }
+                &Argument::Varadict { varadict: _ } => ()
             }
         }
 
@@ -595,7 +621,7 @@ impl Config {
     /// Also worthy of noting, the value of the [HashMap] is [AnyPreprocessable]
     /// which holds a [Arc]<[RwLock]<>> of the name data, meaning that any change
     /// done within the [RwLock] is reflected on the config itself.
-    fn load_key_name_pairs(&self) -> Result<HashMap<String, AnyPreprocessable>, Error> {
+    fn load_preprocessable_key_name_pairs(&self) -> Result<HashMap<String, AnyPreprocessable>, Error> {
         let mut keys: HashMap<String, AnyPreprocessable> = HashMap::new();
 
         // Vrijednosti iz CommonKeyable mogu se pojaviti kao ključevi unutar
@@ -671,18 +697,24 @@ impl Config {
     }
     
 
-    pub fn preprocess(self) -> Result<(), Error> {
+    pub fn preprocess(&self) -> Result<(), Error> {
 
         log::debug!("Starting to preprocess the config.");
 
         log::debug!("Loading key name pairs...");
-        let keys = self.load_key_name_pairs()?;
+        let keys = self.load_preprocessable_key_name_pairs()?;
+        log::trace!("{}",
+            format!("Loaded keys: {:#?}", keys).dimmed()
+        );
         
         log::debug!("Preprocessing key name pairs...");
         preprocess_key_name_pairs(&keys, &self.common.keyable)?;
 
         log::debug!("Loading all preprocessable strings...");
         let preprocessable_strings = self.load_preprocessable_strings();
+        log::trace!("{}",
+            format!("Loaded preprocessable strings: {:#?}", preprocessable_strings).dimmed()
+        );
 
         log::debug!("Preprocessing strings...");
         preprocess_strings(preprocessable_strings, &keys, &self.common.keyable)?;
@@ -690,5 +722,130 @@ impl Config {
         return Ok(())
 
     }
+
+}
+
+mod tests {
+    
+    #[allow(unused_imports)]
+    use super::*;
+
+    /// The tokneizer is both the only thing that interacts with user strings
+    /// and the most complex part of the preprocessor.
+    /// Everything else is pretty simple and relies on enums to guide
+    /// the code.
+
+    #[test]
+    fn test_preprocessor_tokenizer_string_simple() {
+
+        // Simple
+        assert_eq!(
+            preprocessor_string_tokenizer(
+                "hello world@{prefix}"
+            ).unwrap(),
+            vec![
+                PreprocessorToken::Raw("hello world".to_owned()),
+                PreprocessorToken::Key("prefix".to_owned())
+            ]
+        );
+
+    }
+
+    #[test]
+    fn test_preprocessor_tokenizer_complex() {
+
+        // Complex
+        assert_eq!(
+            preprocessor_string_tokenizer(
+                "@{#$%\"\"!23O1''???ŠSĆDsl😍💕😳****}\\@{destroyer}\\\\@{beyonce}#$%\"\"!23O1''???ŠSĆDsl😍💕😳****@{prefix}@{dufus}\\"
+            ).unwrap(),
+            vec![
+                PreprocessorToken::Key("#$%\"\"!23O1''???ŠSĆDsl😍💕😳****".to_owned()),
+                PreprocessorToken::Raw("@{destroyer}\\\\".to_owned()),
+                PreprocessorToken::Key("beyonce".to_owned()),
+                PreprocessorToken::Raw("#$%\"\"!23O1''???ŠSĆDsl😍💕😳****".to_owned()),
+                PreprocessorToken::Key("prefix".to_owned()),
+                PreprocessorToken::Key("dufus".to_owned()),
+                PreprocessorToken::Raw("\\".to_owned()),
+            ]
+        );
+    
+    }
+
+    // Error cases:
+    #[test]
+    fn test_preprocessor_tokenizer_embed() {
+
+        // Check if // is properly handled across various scenarios
+        assert_eq!(
+            preprocessor_string_tokenizer(
+                // Handle embeding, and not embeding both self, a random character
+                // and another token and check if at the edge case (lol) is
+                // handled
+                "\\@ \\\\ \\$ \\{ \\"
+            ).unwrap(),
+            vec![
+                PreprocessorToken::Raw("@ \\\\ \\$ \\{ \\".to_owned())
+            ]
+        );
+
+    }
+
+    #[test]
+    fn test_preprocessor_tokenizer_no_empty_raws() {
+
+        assert_eq!(
+            preprocessor_string_tokenizer(
+                // Check that we dont create random empty raws.
+                "@{hello}@{hi}@{byebye}"
+            ).unwrap(),
+            vec![
+                PreprocessorToken::Key("hello".to_owned()),
+                PreprocessorToken::Key("hi".to_owned()),
+                PreprocessorToken::Key("byebye".to_owned()),
+            ]
+        );
+
+    }
+
+    #[test]
+    fn test_preprocessor_tokenizer_no_empty_reference() {
+
+        assert_eq!(
+            preprocessor_string_tokenizer(
+                // Check that we throw a error on a empty reference.
+                "@{}"
+            ).unwrap_err().kind,
+            ErrorKind::EmptyReference
+        );
+
+    }
+
+    #[test]
+    fn test_preprocessor_tokenizer_illegal_symbol_in_reference() {
+
+        assert_eq!(
+            preprocessor_string_tokenizer(
+                // Check that cant have sigils inside of a reference.
+                "@{@}"
+            ).unwrap_err().kind,
+            ErrorKind::IllegalSymbol
+        );
+
+        assert_eq!(
+            preprocessor_string_tokenizer(
+                "@{{}"
+            ).unwrap_err().kind,
+            ErrorKind::IllegalSymbol
+        );
+
+        assert!(
+            preprocessor_string_tokenizer(
+                "@{a}}"
+            ).is_ok() 
+        );
+
+    }
+
 
 }

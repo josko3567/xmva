@@ -32,6 +32,7 @@ mod args;
 mod config;
 mod sigil;
 mod preprocessor;
+mod compiler;
 
 use clap::Parser;
 use config::Config;
@@ -71,7 +72,18 @@ fn main() {
         }
     }
 
-    log::info!("Finished preprocessing.")
+    log::info!("Finished preprocessing.");
+
+    let output = match config.compile() {
+        Ok(output) => output,
+        Err(err) => {
+            eprintln!("{err}");
+            panic!()
+        }
+    };
+
+    log::trace!("Compilation output:\n{output}");    
+    log::info!("Finished compiling.")
 
     
 }

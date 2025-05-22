@@ -9,13 +9,12 @@ raw = """
 """
 
 keys = [
-    # or
-    {key = "emsg_print_cool", name = {tags = ["NO_PREFIX"], string = "\\@{prefix}ERROR"}}
+    {key = "i will request a rectration of my payment 🥺", name = {tags = ["NO_PREFIX"], string = "@{prefix}ERROR"}}
 ]
 
 [[definition]]
 key        = "emsg_print"
-name       = "ERROR"
+name       = {tags = ["NO_PREFIX"], string = "@{i will request a rectration of my payment 🥺}"}
 parameters = ["message"] # instead of raw.
 expansion  = "static_assert(false, message)"
 
@@ -30,16 +29,16 @@ name      = "ERROR_MESSAGE_NO_ARGS"
 expansion = "\"@{prefix}: [No members] No member was specified for this enum type.\""
 
 [core]
-name = {tags = ["NO_PREFIX"], string = "YA_ECGEN"}
+xmva = "YA_ECGEN"
 args = [
-    {named = "lowercase_name"},
-    {named = "UPPERCASE_NAME"},
+    {key = "lowname", name = "@{prefix}lowercase_name"},
+    {key = "uprname", name = "UPPERCASE_NAME"},
     {varadict = 2}
 ]
 
 [[generator]]
-preamble  = "enum ya_ ## lowercase_name ## _error_codes {"
-repeat    = "YA_ ## UPPERCASE_NAME ## $(0)$[,]"
+preamble  = "enum ya_ ## ${lowname} ## _error_codes {"
+repeat    = "YA_ ## ${uprname} ## $(0)$[,]"
 postamble = "}"
 
 [generator.fallbacks]
@@ -47,8 +46,8 @@ unparity = "@{emsg_print}(@{emsg_unparity})"
 empty    = "@{emsg_print}(@{emsg_no_args})"
 
 [[generator]]
-preamble  = "const char ya_ ## lowercase_name ## conversion_table[] = "
-repeat    = "[YA_ ## UPPERCASE_NAME ## $(0)] = $(1)$[,]"
+preamble  = "const char ya_ ## ${lowname} ## conversion_table[] = "
+repeat    = "[YA_ ## ${uprname} ## $(0)] = $(1)$[,]"
 postamble = ";"
 
 [generator.fallbacks]

@@ -1,5 +1,6 @@
 use std::{path::{Path, PathBuf}, sync::{Arc, RwLock}};
 
+use colored::Colorize;
 use lazy_static::lazy_static;
 use strum::{IntoEnumIterator, EnumProperty, EnumIter};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -61,7 +62,7 @@ impl std::error::Error for Error {}
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CommonKeyable {
     pub prefix: String
- }
+}
 
 /// Common configuration values shared across the entire process of
 /// preprocessing and compiling.
@@ -337,21 +338,38 @@ pub struct Generator {
     #[serde(deserialize_with = "preprocessable_string_deserializer")]
     pub preamble: PreprocessableString,
     
-    /// THE repeat part.
+    /// Repeat represents a string that can contain arguments passed into
+    /// the `xmva` itself and that will be repeated multiple times in the
+    /// generated code.
     /// 
-    /// This guy can utilize some special symbols
-    /// unlike the rest of us mortal [PreprocessableString]s :(.
+    /// This in sense is the core of a `xmva`.
     /// 
-    /// For one, we have `${key}` like the rest of the world,
-    /// but we also have 2 more:
+    /// Depending on the amount of varadict arguments a `xmva` receives
+    /// it will call a x-macro in which this  string is repeated a
+    /// certaint amount of times (it will repeat for 
+    /// [Argument::Varadict]/`varadict argument count` the `xmva` recived).
     /// 
-    /// - `$(argument_count)`: which tells us where to place what argument.
-    /// - `$[character]`: which is a character that will repeat until the last
-    ///                 repeat where we will skip it
+    /// Special sigils
+    /// --------------
+    /// It itself is a [PreprocessableString] meaning it can contain special
+    /// sigils from [crate::sigil::PreprocessorSigil] but it also can contain 
+    /// special sigils from [crate::sigil::CompilerSigil]:
+    /// 
+    /// - `${...}`
+    ///     tells us where to place a named argument:
+    ///     `... ${lowercase_name} ... ${UPPERCASE_NAME}`
+    /// 
+    /// - `$(...)`
+    ///     tells us where to place a varadict argument: 
+    ///     `... $(0) ... $(1) ...`
+    /// 
+    /// - `$[...]`
+    ///     tells us to repeat this character except on the last repeat:
+    ///     `... $[,] ... $[peepee poopoo] ...`
     /// 
     /// Example
     /// -------
-    /// ```toml
+    /// ```TOML
     /// # Lets say that args -> {varadict = 2}.
     /// # Which means we require a minimum of 2 varadict arguments.
     /// # Here our first argument out of our varadict argument pairs
@@ -370,7 +388,7 @@ pub struct Generator {
     /// # [YA_ ## _00] = _01, [YA_ ## _02] = _03
     /// # [YA_ ## _00] = _01, [YA_ ## _02] = _03, [YA_ ## _04] = _05
     /// # ...
-    /// repeat = "[${prefix} ## $(0)] = $(1)$[,]"
+    /// repeat = "[@{prefix} ## $(0)] = $(1)$[,]"
     /// ```
     #[serde(deserialize_with = "preprocessable_string_deserializer")]
     pub repeat: PreprocessableString,
@@ -380,44 +398,55 @@ pub struct Generator {
     pub postamble: PreprocessableString
 }
 
-/// Types of parameters we pass to our X-Macro.
-/// In the array of all x-macros for all varadict argument counts
-/// every single one of them will take all [Paramaters::Named]s as
-/// arguments.
-/// On the other hand we can only create one [Paramaters::Varadict] in
-/// our config. It represents the minimum pair size of varadict arguments.
-/// If [Paramaters::Varadict] =  `2` for example, we can accept 
+#[derive(Deserialize, Debug, Clone)]
+pub struct NamedArgument {
+    pub key: String,
+    #[serde(deserialize_with = "preprocessable_string_deserializer")]
+    pub name: PreprocessableString
+}
+
+/// Types of parameters we pass to our `xmva`.
+/// 
+/// [Argument::Named] is a named parameter the `xmva` will accept and 
+/// have available in the [Generator::repeat] section.
+/// 
+/// [Argument::Varadict] represents the minimum pair size of varadict arguments.
+/// If [Argument::Varadict] =  `2` for example, we can accept 
 /// 2n arguments where n >= 1 and represents a argument pair.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
-pub enum Paramaters {
-    Named    {named: String},
+pub enum Argument {
+    Named(NamedArgument),
     Varadict {varadict: usize}
 }
 
 /// The [Core] which holds the main XMVA name and arguments.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Core {
-    pub name: Name,
-    pub args: Vec<Paramaters>,
+    /// The name of the `xmva` we want to create.
+    #[serde(deserialize_with = "preprocessable_string_deserializer")]
+    pub xmva: PreprocessableString,
+    /// List of paramaters the `xmva` will accept
+    /// including named parameters and the number of
+    /// varadict arguments.
+    pub args: Vec<Argument>,
 }
 
-/// T H E C O N F I G.
+/// The main config structure.
+/// Each part of the [Config] and what they do are explained in their own docs.
+/// 
+/// Init
+/// ----
+/// This structure can be initialized from a `.xmva.toml` file.
+/// ```
+/// let config: Config = Config::load(&Path::new("example.xmva.toml"));
+/// ```
 #[derive(Deserialize, Debug, Clone)]
 pub struct Config {
-    /// Common parameters, such as the global prefix & repeat count.
     pub common:     Common, 
-    /// A raw preamble, where you can write anything you want
-    /// to be included before the generated code.
-    /// Includes keyss so that you can use whatever you wrote in the
-    /// preamble in any part of the code with its key much more nicely.
     pub preamble:   Option<Preamble>,
-    /// The cooler preamble.
     pub definition: Option<Vec<Definition>>,
-    /// The main macro we generate, its name and parameters.
     pub core:       Core,
-    /// This specifies a generator for the list of x-macros that are
-    /// picked depending on the argument count.
     pub generator:  Vec<Generator>,
 }
 
@@ -435,7 +464,7 @@ impl Config {
 
         log::debug!("Loaded file into memory.");
 
-        toml::from_str(&file_contents)
+        let config: Result<Self, Error> = toml::from_str(&file_contents)
             .map_err(|toml_err| Error::TOML { 
                 file: path.to_owned(),
                 message: toml_err.message().to_owned(), 
@@ -448,7 +477,14 @@ impl Config {
                 } else {
                     None
                 }
-            })
+            });
+        
+        log::trace!("{}",
+            format!("Config loaded: {:#?}", config)
+            .dimmed()
+        );
+
+        config
 
     }
 
