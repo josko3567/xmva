@@ -1,11 +1,11 @@
-use std::{collections::HashMap, usize};
+use std::{collections::HashMap, mem::discriminant, usize};
 
 use colored::Colorize;
 use strum::{EnumIter, EnumProperty};
 
 use crate::{
     config::{Argument, Config}, 
-    preprocessor::PreprocessableString,
+    preprocessor::{Preprocessable, PreprocessableString},
     sigil::CompilerSigil
 };
 
@@ -15,7 +15,10 @@ pub enum ErrorKind {
     IllegalSymbol,
     EmptyReference,
     InvalidReference,
-    InvalidToken
+    InvalidToken,
+    PoisonedLock,
+    NotPreprocessed,
+    NonExistantArgument
 }
 
 #[derive(Debug)]
@@ -45,7 +48,7 @@ enum CompilerToken {
     SkipLast(String)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompilerTokenizerState {
     Copying(String),
     CopyingNamedArgumentRef(String),
@@ -65,13 +68,19 @@ impl CompilerToken {
         let mut parts: Vec<CompilerToken> = vec![];
         let mut state: CompilerTokenizerState 
             = CompilerTokenizerState::Copying(String::new());
+        let mut prev_state = state.clone();
 
         for ch in s.chars() {
 
-            // log::trace!("{}{}", 
-            //     format!("[compiler::tokenizer]").bold(),
-            //     format!(" state: {:?}", state)
-            // );
+            if discriminant(&prev_state) != discriminant(&state) {
+                log::trace!(
+                    "{}: {}",
+                    format!("[CompilerToken::tokenize]").bold(),
+                    format!("Curr state {:?}", prev_state).dimmed()
+                );
+            }
+            prev_state = state.clone();
+
             match state {
 
                 CompilerTokenizerState::Copying(ref mut buffer) => {
@@ -272,11 +281,11 @@ impl CompilerToken {
             }
         }
 
-        // log::trace!("{}{}", 
-        //     format!("[compiler::tokenizer]").bold(),
-        //     format!("state: {:?}", state)
-        // );
-
+        log::trace!(
+            "{}: {}",
+            format!("[CompilerToken::tokenize]").bold(),
+            format!("Last state {:?}", state).dimmed()
+        );
         match state {
             CompilerTokenizerState::Copying(buffer) => {
                 if !buffer.is_empty() {
@@ -331,7 +340,14 @@ impl CompilerToken {
 
             match token.get_bool("surface") {
                 Some(true) => (),
-                None | Some(false) => *token = CompilerToken::Raw(token.untokenize())
+                None | Some(false) => {
+                    log::trace!(
+                        "{}: {}",
+                        format!("[CompilerToken::tokenize_surface]").bold(),
+                        format!("Untokenized token: {:?}", token).dimmed()
+                    );
+                    *token = CompilerToken::Raw(token.untokenize())
+                }
             }
 
         }
@@ -407,22 +423,108 @@ impl CompilerToken {
 }
 
 
+
+
 fn compile_surface_string(
-    compilable_string: PreprocessableString
+    compilable_string: PreprocessableString,
+    named: &HashMap<String, PreprocessableString>
 ) -> Result<(), Error> {
 
+    log::trace!("{}", 
+        format!("Attempting to surface compile `{:?}`.", compilable_string)
+        .dimmed()
+    );
+
+    let string_guard = compilable_string.read()
+        .map_err(|err| Error {
+            kind: ErrorKind::PoisonedLock,
+            message: err.to_string()
+        })?;
+
+    let inner = match &*string_guard {
+        Preprocessable::NotPreprocessed(_) => {
+            return Err(Error { 
+                kind: ErrorKind::NotPreprocessed, 
+                message: 
+                format!(
+                    "Recived a string that was not preprocessed during the compilation process: {:?}",
+                    string_guard
+                )
+            })
+        }
+        Preprocessable::Preprocessed(value) => value
+    };
+
+    let tokens =  CompilerToken::tokenize_surface(inner)?;
+    let mut compiled_surface_string = String::new();
+
+    for token in tokens {
+
+        match token {
+            CompilerToken::Raw(ref value) => compiled_surface_string.push_str(value),
+            CompilerToken::NamedArgumentRef(ref value) => {
+                let Some(entry) = named.get(value) else {
+                    return Err(Error { 
+                        kind: ErrorKind::NonExistantArgument, 
+                        message: format!("Argument with key '{}' does not exist, occured when trying to compile '{:?}'", value, inner)
+                    })
+                };
+                let entry_guard = entry.read()
+                    .map_err(|err| Error {
+                        kind: ErrorKind::PoisonedLock,
+                        message: err.to_string()
+                    })?;
+                let entry_inner = match &*entry_guard {
+                    Preprocessable::NotPreprocessed(_) => {
+                        return Err(Error { 
+                            kind: ErrorKind::NotPreprocessed, 
+                            message: 
+                            format!(
+                                "Recived a string that was not preprocessed during the compilation process: {:?}",
+                                string_guard
+                            )
+                        })
+                    }
+                    Preprocessable::Preprocessed(value) => value
+                };
+                compiled_surface_string.push_str(entry_inner);
+            }
+            _ => unreachable!()
+        }
+
+    }
+
+    log::trace!("{}",
+        format!("Surface compiled from `{inner}` -> `{compiled_surface_string}`.")
+        .cyan().dimmed()
+    );
+
+    drop(string_guard);
+
+    let mut string_writer = compilable_string.write()
+        .map_err(|err| Error {
+            kind: ErrorKind::PoisonedLock,
+            message: err.to_string()
+        })?;
+    
+    *string_writer = Preprocessable::Preprocessed(compiled_surface_string);
 
 
-    unimplemented!()
+    Ok(())
+
 }
 
 
 fn compile_surface_strings(
-    compilable_strings: Vec<PreprocessableString>
+    compilable_strings: Vec<PreprocessableString>,
+    named: &HashMap<String, PreprocessableString>
 ) -> Result<(), Error> {
 
     for compilable in compilable_strings {
-        compile_surface_string(compilable)?;
+        compile_surface_string(
+            compilable,
+            named
+        )?;
     }
 
     Ok(())
@@ -472,8 +574,14 @@ impl Config {
             compilable_strings.push(generator.fallbacks.unparity.clone());
             compilable_strings.push(generator.postamble.clone());
             compilable_strings.push(generator.preamble.clone());
+            compilable_strings.push(generator.repeat.clone());
 
         }
+
+        log::trace!("{}",
+            format!("Surface compilable string: {:#?}", compilable_strings)
+            .dimmed()
+        );
         
         return compilable_strings
 
@@ -487,10 +595,13 @@ impl Config {
 
         log::debug!("Loading named arguments...");
         let named = self.load_named_arguments()?;
-        log::debug!("Loading all compilable strings...");
+        log::debug!("Loading all surface ŋcompilable strings...");
         let compilable_strings = self.load_surface_compile_strings();
         log::debug!("Compiling only named arguments into compilable strings...");
-        compile_surface_strings(compilable_strings)?;
+        compile_surface_strings(
+            compilable_strings,
+            &named
+        )?;
 
 
 
@@ -508,11 +619,11 @@ impl Config {
 
 
 mod tests {
-    
+
+    #[allow(unused_imports)]
     use std::io::empty;
-
+    #[allow(unused_imports)]
     use strum::IntoEnumIterator;
-
     #[allow(unused_imports)]
     use super::*;
 

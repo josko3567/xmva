@@ -278,7 +278,7 @@ fn preprocessor_string_tokenizer(
                 parts.push(PreprocessorToken::Raw(buffer))
             }
         }
-        PreprocessorTokenizerState::EmbedFound(buffer) => {
+        PreprocessorTokenizerState::EmbedFound(_) => {
             return Err(Error{
                 kind: ErrorKind::IllegalSymbol,
                 message: format!(
