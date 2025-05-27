@@ -189,15 +189,24 @@ fn preprocessor_string_tokenizer(
             }
             PreprocessorTokenizerState::EmbedFound(ref mut buffer) => {
                 match PreprocessorSigil::from(ch) {
-                    PreprocessorSigil::TokenStart => {
-                        *buffer = buffer.to_owned() + PreprocessorSigil::TokenStart.get_str("ch").unwrap();
-                        state = PreprocessorTokenizerState::Copying(buffer.clone());
+                    PreprocessorSigil::TokenStart |
+                    PreprocessorSigil::TokenEmbed => {
+                        buffer.push(ch);
                     }
                     _ => {
-                        *buffer = buffer.to_owned() + PreprocessorSigil::TokenEmbed.get_str("ch").unwrap() + &ch.to_string();
-                        state = PreprocessorTokenizerState::Copying(buffer.clone());
+                        return Err(Error{
+                            kind: ErrorKind::IllegalSymbol,
+                            message: format!(
+                                "Expected a {:?} symbol {:?} or {:?} symbol {:?} after '{ch}'",
+                                    PreprocessorSigil::TokenStart,
+                                    PreprocessorSigil::TokenStart.get_str("ch"),
+                                    PreprocessorSigil::TokenEmbed,
+                                    PreprocessorSigil::TokenEmbed.get_str("ch")
+                            )
+                        })
                     }
                 }
+                state = PreprocessorTokenizerState::Copying(buffer.clone());
             }
             PreprocessorTokenizerState::SigilFound => {
                 match PreprocessorSigil::from(ch) {  
@@ -270,7 +279,17 @@ fn preprocessor_string_tokenizer(
             }
         }
         PreprocessorTokenizerState::EmbedFound(buffer) => {
-            parts.push(PreprocessorToken::Raw(buffer + PreprocessorSigil::TokenEmbed.get_str("ch").unwrap()))
+            return Err(Error{
+                kind: ErrorKind::IllegalSymbol,
+                message: format!(
+                    "Expected a {:?} symbol {:?} or {:?} symbol {:?} after '{:?}'",
+                        PreprocessorSigil::TokenStart,
+                        PreprocessorSigil::TokenStart.get_str("ch"),
+                        PreprocessorSigil::TokenEmbed,
+                        PreprocessorSigil::TokenEmbed.get_str("ch"),
+                        PreprocessorSigil::TokenStart.get_str("ch")
+                )
+            })
         }
         PreprocessorTokenizerState::SigilFound => {
             return Err(Error {
@@ -774,11 +793,11 @@ mod tests {
         // Complex
         assert_eq!(
             preprocessor_string_tokenizer(
-                "@{#$%\"\"!23O1''???ŠSĆDsl😍💕😳****}\\@{destroyer}\\\\@{beyonce}#$%\"\"!23O1''???ŠSĆDsl😍💕😳****@{prefix}@{dufus}\\"
+                "@{#$%\"\"!23O1''???ŠSĆDsl😍💕😳****}\\@{destroyer}\\\\@{beyonce}#$%\"\"!23O1''???ŠSĆDsl😍💕😳****@{prefix}@{dufus}\\\\"
             ).unwrap(),
             vec![
                 PreprocessorToken::Key("#$%\"\"!23O1''???ŠSĆDsl😍💕😳****".to_owned()),
-                PreprocessorToken::Raw("@{destroyer}\\\\".to_owned()),
+                PreprocessorToken::Raw("@{destroyer}\\".to_owned()),
                 PreprocessorToken::Key("beyonce".to_owned()),
                 PreprocessorToken::Raw("#$%\"\"!23O1''???ŠSĆDsl😍💕😳****".to_owned()),
                 PreprocessorToken::Key("prefix".to_owned()),
@@ -799,11 +818,29 @@ mod tests {
                 // Handle embeding, and not embeding both self, a random character
                 // and another token and check if at the edge case (lol) is
                 // handled
-                "\\@ \\\\ \\$ \\{ \\"
+                "\\@ \\\\\\\\"
             ).unwrap(),
             vec![
-                PreprocessorToken::Raw("@ \\\\ \\$ \\{ \\".to_owned())
+                PreprocessorToken::Raw("@ \\\\".to_owned())
             ]
+        );
+
+        assert!(
+            preprocessor_string_tokenizer(
+                "\\"
+            ).is_err()
+        );
+
+        assert!(
+            preprocessor_string_tokenizer(
+                "\\$"
+            ).is_err()
+        );
+
+        assert!(
+            preprocessor_string_tokenizer(
+                "\\\\n"
+            ).is_ok()
         );
 
     }

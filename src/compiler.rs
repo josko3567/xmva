@@ -45,6 +45,7 @@ enum CompilerToken {
     SkipLast(String)
 }
 
+#[derive(Debug)]
 pub enum CompilerTokenizerState {
     Copying(String),
     CopyingNamedArgumentRef(String),
@@ -67,6 +68,10 @@ impl CompilerToken {
 
         for ch in s.chars() {
 
+            // log::trace!("{}{}", 
+            //     format!("[compiler::tokenizer]").bold(),
+            //     format!(" state: {:?}", state)
+            // );
             match state {
 
                 CompilerTokenizerState::Copying(ref mut buffer) => {
@@ -92,15 +97,24 @@ impl CompilerToken {
                 }
                 CompilerTokenizerState::EmbedFound(ref mut buffer) => {
                     match CompilerSigil::from(ch) {
-                        CompilerSigil::TokenStart => {
-                            *buffer = buffer.to_owned() + CompilerSigil::TokenStart.get_str("ch").unwrap();
-                            state = CompilerTokenizerState::Copying(buffer.clone());
+                        CompilerSigil::TokenStart |
+                        CompilerSigil::TokenEmbed => {
+                            buffer.push(ch);
                         }
                         _ => {
-                            *buffer = buffer.to_owned() + CompilerSigil::TokenEmbed.get_str("ch").unwrap() + &ch.to_string();
-                            state = CompilerTokenizerState::Copying(buffer.clone());
+                            return Err(Error{
+                                kind: ErrorKind::IllegalSymbol,
+                                message: format!(
+                                    "Expected a {:?} symbol {:?} or {:?} symbol {:?} after '{ch}'",
+                                        CompilerSigil::TokenStart,
+                                        CompilerSigil::TokenStart.get_str("ch"),
+                                        CompilerSigil::TokenEmbed,
+                                        CompilerSigil::TokenEmbed.get_str("ch")
+                                )
+                            })
                         }
                     }
+                    state = CompilerTokenizerState::Copying(buffer.clone());
                 }
                 CompilerTokenizerState::SigilFound => {
                     match CompilerSigil::from(ch) {  
@@ -210,6 +224,7 @@ impl CompilerToken {
                     }
                 }
                 CompilerTokenizerState::CopyingSkipLast(ref mut buffer_key) => {
+                    // log::trace!("sl: {ch}");
                     match CompilerSigil::from(ch) {
                         CompilerSigil::SkipLastClose => {
                             if buffer_key.is_empty() {
@@ -233,23 +248,34 @@ impl CompilerToken {
                     }
                 }
                 CompilerTokenizerState::CopyingSkipLastEmbed(ref mut buffer_key) => {
+                    // log::trace!("sle: {ch}");
                     match CompilerSigil::from(ch) {
-                        CompilerSigil::SkipLastClose => {
+                        CompilerSigil::SkipLastClose |
+                        CompilerSigil::TokenEmbed => {
                             buffer_key.push(ch);
-                            state = CompilerTokenizerState::CopyingSkipLast(buffer_key.to_owned());
                         }
                         _ => {
-                            buffer_key.push_str(
-                                format!("{}{}", 
-                                    CompilerSigil::TokenEmbed.get_str("ch").unwrap(), 
-                                    ch
-                                ).as_str()
-                            )
+                            return Err(Error{
+                                kind: ErrorKind::IllegalSymbol,
+                                message: format!(
+                                    "Expected a {:?} symbol {:?} or {:?} symbol {:?} after {ch}",
+                                        CompilerSigil::SkipLastClose,
+                                        CompilerSigil::SkipLastClose.get_str("ch"),
+                                        CompilerSigil::TokenEmbed,
+                                        CompilerSigil::TokenEmbed.get_str("ch")
+                                )
+                            })
                         }
                     }
+                    state = CompilerTokenizerState::CopyingSkipLast(buffer_key.to_owned());
                 }
             }
         }
+
+        // log::trace!("{}{}", 
+        //     format!("[compiler::tokenizer]").bold(),
+        //     format!("state: {:?}", state)
+        // );
 
         match state {
             CompilerTokenizerState::Copying(buffer) => {
@@ -257,8 +283,18 @@ impl CompilerToken {
                     parts.push(CompilerToken::Raw(buffer))
                 }
             }
-            CompilerTokenizerState::EmbedFound(buffer) => {
-                parts.push(CompilerToken::Raw(buffer + CompilerSigil::TokenEmbed.get_str("ch").unwrap()))
+            CompilerTokenizerState::EmbedFound(_) => {
+                return Err(Error{
+                    kind: ErrorKind::IllegalSymbol,
+                    message: format!(
+                        "Expected a {:?} symbol {:?} or {:?} symbol {:?} after {:?}",
+                            CompilerSigil::TokenStart,
+                            CompilerSigil::TokenStart.get_str("ch"),
+                            CompilerSigil::TokenEmbed,
+                            CompilerSigil::TokenEmbed.get_str("ch"),
+                            CompilerSigil::TokenEmbed.get_str("ch")
+                    )
+                })
             }
             CompilerTokenizerState::SigilFound => {
                 return Err(Error {
@@ -307,6 +343,15 @@ impl CompilerToken {
     fn untokenize(&self) -> String {
         match self {
             Self::Raw(value) => value
+                .replace( // first.
+                    format!("{}", 
+                        CompilerSigil::TokenEmbed.get_str("ch").unwrap(),
+                    ).as_str(), 
+                    format!("{}{}",
+                        CompilerSigil::TokenEmbed.get_str("ch").unwrap(),
+                        CompilerSigil::TokenEmbed.get_str("ch").unwrap(),
+                    ).as_str()
+                )
                 .replace(
                     format!("{}",
                         CompilerSigil::TokenStart.get_str("ch").unwrap()
@@ -335,6 +380,15 @@ impl CompilerToken {
                 CompilerSigil::TokenStart.get_str("ch").unwrap().to_owned() +
                 CompilerSigil::SkipLastOpen.get_str("ch").unwrap() +
                 value
+                    .replace( // first.
+                        format!("{}", 
+                            CompilerSigil::TokenEmbed.get_str("ch").unwrap(),
+                        ).as_str(), 
+                        format!("{}{}",
+                            CompilerSigil::TokenEmbed.get_str("ch").unwrap(),
+                            CompilerSigil::TokenEmbed.get_str("ch").unwrap(),
+                        ).as_str()
+                    )
                     .replace(
                         format!("{}", 
                             CompilerSigil::SkipLastClose.get_str("ch").unwrap(),
@@ -584,10 +638,14 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test] 
+    // probably the most comprehensive test here, usually the first one 
+    // to fail if something went wrong or we added a new feature.
+    // be sure to not use stupid numbers like 00001 instead of 1 since the
+    // compiler cant read your thoughts only what you wrote.
     fn tokenize_and_untokenize() {
 
-        let s = "$.$.[HELLO_ ## ${NAME} ## _ ## $(0)] = \"\\$$(1)$[,\\]]\"";
+        let s = "$.$.[HELLO_ ## ${NAME} ## _ ## $(0)] = \"\\$$(1)$[,\\]\\\\]\"";
 
         assert_eq!(
             s.to_owned(),
@@ -600,12 +658,12 @@ mod tests {
                 .join("")
         );
 
-        let s1 = "\\$$.\\{[gello${wo.rld💔🔥}${..skadkAK100'0'💔💔💔🔥\\@..}]}$[,,,💔🔥.sfak\\]\\]\\]]$.$(12031000)$.\\$$(100000000000000000000000001)$[\\]\\]\\]]";
+        let s1 = "\\$$.\\\\{[gello${wo.rld💔🔥}${..skadkAK100'0'💔💔💔🔥@..}]}$[,,,💔🔥.sfak\\]\\]\\]]$.$(12031000)$.\\$$(1000)$[\\\\\\]\\]\\]]\\\\\\$";
         
         assert_eq!(
-            s.to_owned(),
+            s1.to_owned(),
             //Tokenize and untokenize
-            CompilerToken::tokenize(s)
+            CompilerToken::tokenize(s1)
                 .unwrap()
                 .into_iter()
                 .map(|x| x.untokenize())
@@ -658,6 +716,45 @@ mod tests {
         assert!(
             CompilerToken::tokenize(illegal_sigil_skip).is_ok()
         );
+
+    }
+
+    #[test]
+    fn tokenizer_embed() {
+
+        assert_eq!(
+            CompilerToken::tokenize("").unwrap(),
+            vec![]
+        );
+
+        assert!(
+            CompilerToken::tokenize("\\").is_err()
+        );
+
+        assert!(
+            CompilerToken::tokenize("\\s").is_err()
+        );
+
+        assert_eq!(
+            CompilerToken::tokenize("\\\\").unwrap(),
+            vec![CompilerToken::Raw("\\".to_owned())]
+        );
+
+        assert_eq!(
+            CompilerToken::tokenize("\\$").unwrap(),
+            vec![CompilerToken::Raw("$".to_owned())]
+        );
+
+        assert_eq!(
+            CompilerToken::tokenize("\\\\n\\$\\\\\\\\%\\\\").unwrap(),
+            vec![CompilerToken::Raw("\\n$\\\\%\\".to_owned())]
+        );
+
+        assert_eq!(
+            CompilerToken::tokenize("$[\\\\n\\\\$\\\\\\\\%\\]]").unwrap(),
+            vec![CompilerToken::SkipLast("\\n\\$\\\\%]".to_owned())]
+        );
+
 
     }
 
