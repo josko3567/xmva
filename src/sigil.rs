@@ -33,15 +33,23 @@ pub enum CompilerSigil {
     #[strum(props(ch = "\\"))]
     TokenEmbed,
 
-    #[strum(props(ch = "["))]
-    CompilerSkipLastOpen,
-    #[strum(props(ch = "]"))]
-    CompilerSkipLastClose,
+    #[strum(props(ch = "."))]
+    PositionDot,
+
+    #[strum(props(ch = "{"))]
+    NamedArgumentRefOpen,
+    #[strum(props(ch = "}"))]
+    NamedArgumentRefClose,
 
     #[strum(props(ch = "("))]
-    CompilerArgumentRefOpen,
+    UnamedArgumentRefOpen,
     #[strum(props(ch = ")"))]
-    CompilerArgumentRefClose,
+    UnamedArgumentRefClose,
+
+    #[strum(props(ch = "["))]
+    SkipLastOpen,
+    #[strum(props(ch = "]"))]
+    SkipLastClose,
 
 }
 
@@ -99,5 +107,14 @@ impl From<char> for PreprocessorSigil {
             return sigil.to_owned();
         }
         PreprocessorSigil::Non(value)
+    }
+}
+
+impl From<char> for CompilerSigil {
+    fn from(value: char) -> Self {
+        if let Some(sigil) = COMPILER_SIGIL_CONVERSION_TABLE.get(&value) {
+            return sigil.to_owned();
+        }
+        CompilerSigil::Non(value)
     }
 }

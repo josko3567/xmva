@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::{Arc, Mutex, RwLock}};
+use std::{collections::HashMap, mem::discriminant, sync::{Arc, Mutex, RwLock}};
 
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
@@ -137,6 +137,7 @@ pub enum PreprocessorToken {
     Key(String)
 }
 
+#[derive(Debug, Clone)]
 pub enum PreprocessorTokenizerState {
     Copying(String),
     CopyingKey(String),
@@ -155,8 +156,18 @@ fn preprocessor_string_tokenizer(
     let mut parts: Vec<PreprocessorToken> = vec![];
     let mut state: PreprocessorTokenizerState 
         = PreprocessorTokenizerState::Copying(String::new());
+    let mut prev_state = state.clone();
 
     for ch in s.chars() {
+
+        if discriminant(&prev_state) != discriminant(&state) {
+            log::trace!(
+                "{}: {}",
+                format!("[preprocessor_string_tokenizer]").bold(),
+                format!("Curr state {:?}", prev_state).dimmed()
+            );
+        }
+        prev_state = state.clone();
 
         match state {
 
@@ -245,6 +256,12 @@ fn preprocessor_string_tokenizer(
             }
         }
     }
+
+    log::trace!(
+        "{}: {}",
+        format!("[preprocessor_string_tokenizer]").bold(),
+        format!("Last state {:?}", state).dimmed()
+    );
 
     match state {
         PreprocessorTokenizerState::Copying(buffer) => {
@@ -736,7 +753,7 @@ mod tests {
     /// the code.
 
     #[test]
-    fn test_preprocessor_tokenizer_string_simple() {
+    fn tokenizer_simple() {
 
         // Simple
         assert_eq!(
@@ -752,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn test_preprocessor_tokenizer_complex() {
+    fn tokenizer_complex() {
 
         // Complex
         assert_eq!(
@@ -774,7 +791,7 @@ mod tests {
 
     // Error cases:
     #[test]
-    fn test_preprocessor_tokenizer_embed() {
+    fn tokenizer_check_embed() {
 
         // Check if // is properly handled across various scenarios
         assert_eq!(
@@ -792,11 +809,12 @@ mod tests {
     }
 
     #[test]
-    fn test_preprocessor_tokenizer_no_empty_raws() {
+    fn tokenizer_check_no_empty_raws() {
 
         assert_eq!(
             preprocessor_string_tokenizer(
-                // Check that we dont create random empty raws.
+                // Check that we dont create random empty raws between these
+                // PreprocessorToken::Key.
                 "@{hello}@{hi}@{byebye}"
             ).unwrap(),
             vec![
@@ -809,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn test_preprocessor_tokenizer_no_empty_reference() {
+    fn tokenizer_check_no_empty_reference() {
 
         assert_eq!(
             preprocessor_string_tokenizer(
@@ -822,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn test_preprocessor_tokenizer_illegal_symbol_in_reference() {
+    fn tokenizer_check_illegal_symbol_in_reference() {
 
         assert_eq!(
             preprocessor_string_tokenizer(
