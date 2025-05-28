@@ -7,6 +7,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::preprocessor::{Preprocessable, PreprocessableName, PreprocessableString};
 
+const MAX_REPEATS: usize = 10000; // so i dont accidentaly eat my entire ssd
+
 #[derive(Debug)]
 pub enum Error {
     IO   {file: PathBuf, message: String},
@@ -464,7 +466,7 @@ impl Config {
 
         log::debug!("Loaded file into memory.");
 
-        let config: Result<Self, Error> = toml::from_str(&file_contents)
+        let mut config: Self = toml::from_str(&file_contents)
             .map_err(|toml_err| Error::TOML { 
                 file: path.to_owned(),
                 message: toml_err.message().to_owned(), 
@@ -477,14 +479,21 @@ impl Config {
                 } else {
                     None
                 }
-            });
+            })?;
+
+        // limit repeats
+        config.common.repeats = std::cmp::min(MAX_REPEATS, config.common.repeats);
+
+        if config.common.output.is_none() {
+            config.common.output = Some(path.to_owned());
+        }
         
         log::trace!("{}",
             format!("Config loaded: {:#?}", config)
             .dimmed()
         );
 
-        config
+        Ok(config)
 
     }
 

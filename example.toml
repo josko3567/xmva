@@ -31,24 +31,24 @@ expansion = "\"@{prefix}: [No members] No member was specified for this enum typ
 [core]
 xmva = "YA_ECGEN"
 args = [
-    {key = "lowname", name = "@{prefix}lowercase_name"},
+    {key = "lowname", name = "lowercase_name"},
     {key = "uprname", name = "UPPERCASE_NAME"},
     {varadict = 2}
 ]
 
 [[generator]]
 preamble  = "enum ya_ ## ${lowname} ## _error_codes {"
-repeat    = "YA_ ## ${uprname} ## $(0)$[,]"
-postamble = "}"
+repeat    = "YA_ ## ${uprname} ## _ ## $(0)$[,]"
+postamble = "};"
 
 [generator.fallbacks]
 unparity = "@{emsg_print}(@{emsg_unparity})"
 empty    = "@{emsg_print}(@{emsg_no_args})"
 
 [[generator]]
-preamble  = "const char ya_ ## ${lowname} ## conversion_table[] = "
-repeat    = "[YA_ ## ${uprname} ## $(0)] = $(1)$[,]"
-postamble = ";"
+preamble  = "const char *ya_ ## ${lowname} ## _conversion_table[] = {"
+repeat    = "[YA_ ## ${uprname} ## _ ## $(0)] = $(1)$[, ]"
+postamble = "};"
 
 [generator.fallbacks]
 unparity = "@{emsg_print}(@{emsg_unparity})"

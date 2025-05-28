@@ -25,8 +25,8 @@ pub enum ErrorKind {
 
 #[derive(Debug)]
 pub struct Error {
-    kind: ErrorKind,
-    message: String
+    pub kind: ErrorKind,
+    pub(crate) message: String
 }
 
 impl std::fmt::Display for Error {

@@ -1,13 +1,15 @@
-use std::{collections::HashMap, mem::discriminant, usize};
+use std::{collections::HashMap, mem::discriminant, thread::current, usize};
 
 use colored::Colorize;
 use strum::{EnumIter, EnumProperty};
 
 use crate::{
-    config::{Argument, Config}, 
-    preprocessor::{Preprocessable, PreprocessableString},
-    sigil::CompilerSigil
+    config::{Argument, Common, Config, Core, Fallbacks, Generator}, main, preprocessor::{Preprocessable, PreprocessableString}, sigil::CompilerSigil
 };
+
+const REPEAT_SECTION_SUFFIX: &'static str = "__ARGS__";
+const GENERATOR_SUFFIX: &'static str = "__GENERATOR__";
+
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -24,7 +26,7 @@ pub enum ErrorKind {
 #[derive(Debug)]
 pub struct Error {
     pub kind: ErrorKind,
-    message: String
+    pub(crate) message: String
 }
 
 impl std::fmt::Display for Error {
@@ -422,9 +424,6 @@ impl CompilerToken {
 
 }
 
-
-
-
 fn compile_surface_string(
     compilable_string: PreprocessableString,
     named: &HashMap<String, PreprocessableString>
@@ -531,6 +530,447 @@ fn compile_surface_strings(
 
 }
 
+fn generate_repeat_name(
+    common: &Common,
+    n: usize,
+    suffix: usize
+) -> String {
+
+    let mut name = String::new();
+    name.push_str(&common.keyable.prefix);
+    name.push_str(REPEAT_SECTION_SUFFIX);
+    name.push_str(suffix.to_string().as_str());
+    name.push('_');
+    name.push_str(n.to_string().as_str());
+    name
+
+}
+
+fn generate_repeat_picker_macro_name(
+    common: &Common,
+    suffix: usize
+) -> String {
+
+    let mut name = String::new();
+    name.push_str(&common.keyable.prefix);
+    name.push_str(REPEAT_SECTION_SUFFIX);
+    name.push_str(suffix.to_string().as_str());
+    name
+
+}
+
+fn compile_and_assemble_repeat_string(
+    s: PreprocessableString,
+    fallbacks: &Fallbacks,
+    common:    &Common,
+    core:      &Core,
+    suffix:    usize
+) -> Result<String, Error> {
+
+    let read_guard = fallbacks.empty.read()
+         .map_err(|err| Error {
+            kind: ErrorKind::PoisonedLock,
+            message: err.to_string()
+        })?;
+
+    let fallback_empty = match &*read_guard {
+        Preprocessable::NotPreprocessed(_) => {
+            return Err(Error { 
+                kind: ErrorKind::NotPreprocessed, 
+                message: 
+                format!(
+                    "Recived a string that was not preprocessed during the compilation process: {:?}",
+                    read_guard
+                )
+            })
+        }
+        Preprocessable::Preprocessed(s) => s.clone()
+    };
+    drop(read_guard);
+
+    let read_guard = fallbacks.unparity.read()
+         .map_err(|err| Error {
+            kind: ErrorKind::PoisonedLock,
+            message: err.to_string()
+        })?;
+
+    let fallback_unparity = match &*read_guard {
+        Preprocessable::NotPreprocessed(_) => {
+            return Err(Error { 
+                kind: ErrorKind::NotPreprocessed, 
+                message: 
+                format!(
+                    "Recived a string that was not preprocessed during the compilation process: {:?}",
+                    read_guard
+                )
+            })
+        }
+        Preprocessable::Preprocessed(s) => s.clone()
+    };
+    drop(read_guard);
+
+    let mut named_args: Vec<String> = vec![];
+    let mut some_va_args: Option<usize> = None;
+
+    for args in core.args.iter() {
+        match args {
+            Argument::Named(named) => {
+                let read_guard = named.name.read()
+                    .map_err(|err| Error {
+                        kind: ErrorKind::PoisonedLock,
+                        message: err.to_string()
+                    })?;
+
+                let fallback_unparity = match &*read_guard {
+                    Preprocessable::NotPreprocessed(_) => {
+                        return Err(Error { 
+                            kind: ErrorKind::NotPreprocessed, 
+                            message: 
+                            format!(
+                                "Recived a string that was not preprocessed during the compilation process: {:?}",
+                                read_guard
+                            )
+                        })
+                    }
+                    Preprocessable::Preprocessed(s) => named_args.push(s.clone())
+                };
+            }
+            Argument::Varadict { varadict } => {
+                if some_va_args.is_some() {
+                    return Err(Error { 
+                        kind: ErrorKind::DuplicateArgument, 
+                        message: "2 or more conflicting varadict argument count arguments".to_string()
+                    })
+                }
+                some_va_args = Some(*varadict)
+            }
+        }
+    }
+
+    let Some(va_args) = some_va_args else {
+        return Err(Error { 
+            kind: ErrorKind::NonExistantArgument, 
+            message: "Missing varadict argument count argument".to_string()
+        })
+    };
+
+    let read_guard = s.read()
+         .map_err(|err| Error {
+            kind: ErrorKind::PoisonedLock,
+            message: err.to_string()
+        })?;
+
+    let le_stranger = match &*read_guard {
+        Preprocessable::NotPreprocessed(_) => {
+            return Err(Error { 
+                kind: ErrorKind::NotPreprocessed, 
+                message: 
+                format!(
+                    "Recived a string that was not preprocessed during the compilation process: {:?}",
+                    read_guard
+                )
+            })
+        }
+        Preprocessable::Preprocessed(le_stranger) => le_stranger
+    };
+
+    let le_tokens = CompilerToken::tokenize(le_stranger)?;
+    let mut generated_repeats = String::new();
+
+    generated_repeats.push_str("#define ");
+    generated_repeats.push_str(generate_repeat_name(common, 0, suffix).as_str());
+    generated_repeats.push('(');
+    generated_repeats.push_str(named_args.join(", ").as_str());
+    generated_repeats.push(')');
+    generated_repeats.push(' ');
+    generated_repeats.push_str(fallback_empty.as_str());
+    generated_repeats.push('\n');
+
+    for current_repetiton in 1..common.repeats {
+        
+        generated_repeats.push_str("#define ");
+        generated_repeats.push_str(generate_repeat_name(common, current_repetiton, suffix).as_str());
+        generated_repeats.push('(');
+        generated_repeats.push_str(named_args.join(", ").as_str());
+        generated_repeats.push_str(", ");
+        generated_repeats.push_str(
+            (0..current_repetiton)
+                .map(|i| format!("__{i}__"))
+                .collect::<Vec<String>>()
+                .join(", ")
+                .as_str()
+        );
+        generated_repeats.push(')');
+        generated_repeats.push(' ');
+
+        if current_repetiton % va_args == 0 {
+
+            let j = current_repetiton/va_args;
+
+            for i in 0..j {
+                
+                for token in le_tokens.iter() {
+
+                    match token {
+                        CompilerToken::NamedArgumentRef(_) => unreachable!(),
+                        CompilerToken::Raw(s) => {
+                            generated_repeats.push_str(s)
+                        }
+                        CompilerToken::Position => {
+                            generated_repeats.push_str((i+1).to_string().as_str());
+                        }
+                        CompilerToken::UnamedArgumentRef(n) => {
+                            generated_repeats.push_str(format!("__{}__", n + i*va_args).as_str())
+                        }
+                        CompilerToken::SkipLast(s) => {
+                            if j-1 != i {
+                                generated_repeats.push_str(s);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            generated_repeats.push_str(fallback_unparity.as_str());
+        }
+
+        generated_repeats.push('\n');
+
+    }
+
+    generated_repeats.push_str("#define ");
+    generated_repeats.push_str(generate_repeat_picker_macro_name(common, suffix).as_str());
+    generated_repeats.push('(');
+    generated_repeats.push_str(
+    (0..common.repeats)
+        .map(|i| format!("__{i}__"))
+        .collect::<Vec<String>>()
+        .join(", ")
+        .as_str()
+    );
+    generated_repeats.push_str(", __NAME__, ...) __NAME__");
+
+    Ok(generated_repeats)
+
+}
+
+
+fn generate_generator_macro_name(
+    common: &Common,
+    suffix: usize
+) -> String {
+
+    let mut name = String::new();
+    name.push_str(&common.keyable.prefix);
+    name.push_str(GENERATOR_SUFFIX);
+    name.push_str(suffix.to_string().as_str());
+    name
+
+}
+
+
+fn assemble_generator_string(
+    generator: &Generator,
+    common: &Common,
+    core: &Core,
+    suffix: usize
+) -> Result<String, Error> {
+
+    let read_guard = generator.preamble.read()
+         .map_err(|err| Error {
+            kind: ErrorKind::PoisonedLock,
+            message: err.to_string()
+        })?;
+
+    let preamble = match &*read_guard {
+        Preprocessable::NotPreprocessed(_) => {
+            return Err(Error { 
+                kind: ErrorKind::NotPreprocessed, 
+                message: 
+                format!(
+                    "Recived a string that was not preprocessed during the compilation process: {:?}",
+                    read_guard
+                )
+            })
+        }
+        Preprocessable::Preprocessed(s) => s.clone()
+    };
+    drop(read_guard);
+
+    let read_guard = generator.postamble.read()
+         .map_err(|err| Error {
+            kind: ErrorKind::PoisonedLock,
+            message: err.to_string()
+        })?;
+
+    let postamble = match &*read_guard {
+        Preprocessable::NotPreprocessed(_) => {
+            return Err(Error { 
+                kind: ErrorKind::NotPreprocessed, 
+                message: 
+                format!(
+                    "Recived a string that was not preprocessed during the compilation process: {:?}",
+                    read_guard
+                )
+            })
+        }
+        Preprocessable::Preprocessed(s) => s.clone()
+    };
+    drop(read_guard);
+
+    let mut named_args: Vec<String> = vec![];
+
+    for args in core.args.iter() {
+        match args {
+            Argument::Named(named) => {
+                let read_guard = named.name.read()
+                    .map_err(|err| Error {
+                        kind: ErrorKind::PoisonedLock,
+                        message: err.to_string()
+                    })?;
+
+                match &*read_guard {
+                    Preprocessable::NotPreprocessed(_) => {
+                        return Err(Error { 
+                            kind: ErrorKind::NotPreprocessed, 
+                            message: 
+                            format!(
+                                "Recived a string that was not preprocessed during the compilation process: {:?}",
+                                read_guard
+                            )
+                        })
+                    }
+                    Preprocessable::Preprocessed(s) => named_args.push(s.clone())
+                };
+            }
+            Argument::Varadict { varadict: _ } => ()
+        }
+    }
+
+
+    let mut generator_macro = String::new();
+
+    generator_macro.push_str("#define ");
+    generator_macro.push_str(generate_generator_macro_name(common, suffix).as_str());
+    generator_macro.push('(');
+    generator_macro.push_str(named_args.join(", ").as_str());
+    generator_macro.push_str(", __GEN__, ...");
+    generator_macro.push(')');
+    generator_macro.push(' ');
+    generator_macro.push_str(preamble.as_str());
+    generator_macro.push_str("__GEN__(");
+    generator_macro.push_str(named_args.join(", ").as_str());
+    generator_macro.push_str(", __VA_ARGS__)");
+    generator_macro.push_str(postamble.as_str());
+    generator_macro.push('\n');
+
+    Ok(generator_macro)
+    
+}
+
+fn assemble_main_macro_string(
+    core: &Core,
+    common: &Common,
+    generator_count: usize
+) -> Result<String, Error> {
+
+    let read_guard = core.xmva.read()
+         .map_err(|err| Error {
+            kind: ErrorKind::PoisonedLock,
+            message: err.to_string()
+        })?;
+
+    let xmva = match &*read_guard {
+        Preprocessable::NotPreprocessed(_) => {
+            return Err(Error { 
+                kind: ErrorKind::NotPreprocessed, 
+                message: 
+                format!(
+                    "Recived a string that was not preprocessed during the compilation process: {:?}",
+                    read_guard
+                )
+            })
+        }
+        Preprocessable::Preprocessed(s) => s.clone()
+    };
+    drop(read_guard);
+
+    let mut named_args: Vec<String> = vec![];
+    let mut some_va_args: Option<usize> = None;
+
+    for args in core.args.iter() {
+        match args {
+            Argument::Named(named) => {
+                let read_guard = named.name.read()
+                    .map_err(|err| Error {
+                        kind: ErrorKind::PoisonedLock,
+                        message: err.to_string()
+                    })?;
+
+                match &*read_guard {
+                    Preprocessable::NotPreprocessed(_) => {
+                        return Err(Error { 
+                            kind: ErrorKind::NotPreprocessed, 
+                            message: 
+                            format!(
+                                "Recived a string that was not preprocessed during the compilation process: {:?}",
+                                read_guard
+                            )
+                        })
+                    }
+                    Preprocessable::Preprocessed(s) => named_args.push(s.clone())
+                };
+            }
+            Argument::Varadict { varadict } => {
+                if some_va_args.is_some() {
+                    return Err(Error { 
+                        kind: ErrorKind::DuplicateArgument, 
+                        message: "2 or more conflicting varadict argument count arguments".to_string()
+                    })
+                }
+                some_va_args = Some(*varadict)
+            }
+        }
+    }
+
+    let Some(va_args) = some_va_args else {
+        return Err(Error { 
+            kind: ErrorKind::NonExistantArgument, 
+            message: "Missing varadict argument count argument".to_string()
+        })
+    };
+
+    let mut main_macro = String::new();
+
+    main_macro.push_str("#define ");
+    main_macro.push_str(xmva.as_str());
+    main_macro.push('(');
+    main_macro.push_str(named_args.join(", ").as_str());
+    main_macro.push_str(", ...) ");
+    
+    for i in 0..generator_count {
+        main_macro.push_str(generate_generator_macro_name(common, i).as_str());
+        main_macro.push('(');
+        main_macro.push_str(named_args.join(", ").as_str());
+        main_macro.push_str(", ");
+        main_macro.push_str(&generate_repeat_picker_macro_name(common, i).as_str());
+        main_macro.push_str("(\"empty\", ##__VA_ARGS__, ");
+        main_macro.push_str(
+        (0..common.repeats)
+            .map(|j| generate_repeat_name(common, j, i))
+            .rev()
+            .collect::<Vec<String>>()
+            .join(", ")
+            .as_str()
+        );
+        main_macro.push_str("), __VA_ARGS__) ");
+    }
+
+    Ok(main_macro)
+
+}
+
+
 impl Config {
 
     fn load_named_arguments(
@@ -562,7 +1002,7 @@ impl Config {
 
     }
 
-    fn load_surface_compile_strings(
+    fn load_surface_compilable_strings(
         &self
     ) -> Vec<PreprocessableString> {
 
@@ -587,7 +1027,118 @@ impl Config {
 
     }
 
-    pub fn compile(
+
+
+    fn assemble_preamble(
+        &self
+    ) -> Result<String, Error> {
+
+        let mut assembled_preamble: String = String::new();
+
+        match &self.preamble {
+            Some(preamble) => { 
+                match &preamble.raw {
+                    Some(raw) => {
+                        let read_guard = raw.read()
+                            .map_err(|err| Error {
+                                kind: ErrorKind::PoisonedLock,
+                                message: err.to_string()
+                            })?;
+                        match &*read_guard {
+                            Preprocessable::NotPreprocessed(_) => {
+                                return Err(Error { 
+                                    kind: ErrorKind::NotPreprocessed, 
+                                    message: 
+                                    format!(
+                                        "Recived a string that was not preprocessed during the compilation process: {:?}",
+                                        read_guard
+                                    )
+                                })
+                            }
+                            Preprocessable::Preprocessed(string) => {
+                                assembled_preamble.push_str(string);
+                                assembled_preamble.push('\n');
+                            }
+                        }
+                    }
+                    None => ()
+                }
+            }
+            None => ()
+        }
+
+        if self.definition.is_some() {
+            for definition in self.definition.clone().unwrap().iter() {
+
+                assembled_preamble.push_str("#define ");
+
+                let read_guard = definition.name.read()
+                    .map_err(|err| Error {
+                        kind: ErrorKind::PoisonedLock,
+                        message: err.to_string()
+                    })?;
+                match &*read_guard {
+                    Preprocessable::NotPreprocessed(_) => {
+                        return Err(Error { 
+                            kind: ErrorKind::NotPreprocessed, 
+                            message: 
+                            format!(
+                                "Recived a string that was not preprocessed during the compilation process: {:?}",
+                                read_guard
+                            )
+                        })
+                    }
+                    Preprocessable::Preprocessed(name) => {
+                        assembled_preamble.push_str(name);
+                    }
+                }
+                drop(read_guard);
+
+                if definition.parameters.is_some() {
+                    let parameters = definition.parameters.clone().unwrap();
+                    assembled_preamble.push_str(
+                        format!(
+                            "({})",
+                            parameters.join(", ")
+                        ).as_str()
+                    );
+                }
+
+                assembled_preamble.push(' ');
+
+                let read_guard = definition.expansion.read()
+                    .map_err(|err| Error {
+                        kind: ErrorKind::PoisonedLock,
+                        message: err.to_string()
+                    })?;
+                match &*read_guard {
+                    Preprocessable::NotPreprocessed(_) => {
+                        return Err(Error { 
+                            kind: ErrorKind::NotPreprocessed, 
+                            message: 
+                            format!(
+                                "Recived a string that was not preprocessed during the compilation process: {:?}",
+                                read_guard
+                            )
+                        })
+                    }
+                    Preprocessable::Preprocessed(expansion) => {
+                        assembled_preamble.push_str(expansion);
+                        assembled_preamble.push('\n');
+                    }
+                }
+                drop(read_guard);
+            }
+        }
+
+        log::trace!("{}", format!("Created preamble: \n{}", assembled_preamble).dimmed());
+        Ok(assembled_preamble)
+        
+    }
+
+
+
+    pub fn compile_and_assemble(
         &self
     ) -> Result<String, Error> {
 
@@ -595,23 +1146,61 @@ impl Config {
 
         log::debug!("Loading named arguments...");
         let named = self.load_named_arguments()?;
-        log::debug!("Loading all surface ŋcompilable strings...");
-        let compilable_strings = self.load_surface_compile_strings();
-        log::debug!("Compiling only named arguments into compilable strings...");
+        log::debug!("Loading all surface compilable strings...");
+        let compilable_strings = self.load_surface_compilable_strings();
+        log::debug!("Surface compiling...");
         compile_surface_strings(
             compilable_strings,
             &named
         )?;
 
+        // surface compile and then start assembling the file
+        log::debug!("Assembling preamble...");
+        let preamble = self.assemble_preamble()?;
+
+        // during the compilation we compile and assemble the repeat part
+
+        let mut repeats: Vec<String> =  vec![];
+        let mut generators: Vec<String> = vec![];
+        log::debug!("Compiling and assembling the repeat section, and assembling the generator macro...");
+        for (i, generator) in self.generator.iter().enumerate() {
+
+            repeats.push(
+                compile_and_assemble_repeat_string(
+                    generator.repeat.clone(), 
+                    &generator.fallbacks, 
+                    &self.common, 
+                    &self.core,
+                    i
+                )?
+            );
+
+            generators.push(
+                assemble_generator_string(
+                    &generator, 
+                    &self.common, 
+                    &self.core,
+                    i
+                )?
+            );
+
+        }
+
+        log::debug!("Assembling the main xmva macro...");
+        let xmva = assemble_main_macro_string(
+            &self.core, 
+            &self.common, 
+            self.generator.len()
+        )?;
 
 
+        log::debug!("Assembling file contents...");
+        let file = format!("{preamble}\n{}\n{}\n{xmva}",
+            repeats.join("\n"),
+            generators.join("\n")
+        );
 
-
-
-        
-
-
-        unimplemented!()
+        Ok(file)
 
     }
 

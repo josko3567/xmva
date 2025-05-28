@@ -27,12 +27,113 @@
 //! itself would have been overkill ;_;).
 //! 
 //! But i've dug my own grave so ill just do my best 👍
+//! 
+//! TODO:
+//! if i got the time, preprocessor.rs and compiler.rs are both pretty full to
+//! the brim with functions from all sides.
+//! Best to do with this:
+//! 
+//! preprocessor.rs
+//! 
+//! into..
+//! 
+//! preprocessor
+//! +--mod.rs // preprocessing 
+//! +--token.rs // tokens and tokenizer
+//! 
+//! and implement a similiar structure to compiler where his tokens have
+//! impl of tokenize and detokenize [also implement detokenize mostly for tests].
+//! 
+//! compiler.rs
+//! 
+//! into
+//! 
+//! compiler
+//! +--mod.rs // compiling
+//! +--token.rs // tokens and tokenizers
+//! +--surface.rs // surface compiler
+//! +--repeat.rs // special repeat pattern compiler
+//! assembler.rs // assembling the compiled code into a file.
+//! 
+//! also good would be to have a Compilable<> object for surface compilables
+//! and Repeat<> object for the repeat pattern.
+//! 
+//! kinda like
+//! 
+//! Compilable {
+//!     Uncompiled(PreprocessableString)
+//!     Compiled(String)
+//! }
+//! 
+//! Repeat {
+//!     Ungenerated(Compilable)
+//!     Generated(String)
+//! }
+//! 
+//! and instead of doin arc mutex we make a type that implements arc mutex.
+//! kinda like...
+//! Reflective<> // meaning that we can change it even if we only have a refrence.
+//! 
+//! this way we can also make types like:
+//! 
+//! Reflective<Repeat<Compilable<Preprocessable<String>>>>
+//! 
+//! but instead of writing this monstrosity of verbosity
+//! we can instead just expect every type Repeat has to be a Compilable
+//! and every Compilable to be a Preprocessable.
+//! 
+//! Reflective<Repeat<String>>
+//! Reflective<Compilable<String>>
+//! Reflective<Preprocessable<String>>
+//! 
+//! then the underlying types are
+//! 
+//! Repeat<T> {
+//!     Ungenerated(Compilable<T>)
+//!     Generated(String)
+//! }
+//! 
+//! Compilable<T> {
+//!     Uncompiled(Preprocessable<T>)
+//!     Compiled(String)
+//! }
+//! 
+//! and instead of writing along with them a monstrostiy of a match statment
+//! to get the underlying type especially with Repeat we can just make
+//! a function .get_<type>()
+//! 
+//! so we can do let raw = repeat.get_ungenerated()?.get_uncompiled()?.get_preprocessed()?;
+//! 
+//! but now the main question is how would you edit these like i do now?
+//! 
+//! reflective is only reflective on the Repeat so if we take the preprocessed
+//! part we cant edit it we have to create a new Repeat::Ungenerated(Compiled::Uncompiled(Preprocessed::Type))
+//! 
+//! maybe we make all of these types reflective?
+//! orr we can simply edit the AnyPreprocessable to handle Repeat and Compiled
+//! 
+//! repeat and compilable have to implement compiler tokenizer
+//! while preprocessables have to implement the preprocessor tokenizer.
+//! 
+//! errors are very similar across the board so a error.rs would be great
+//! aswell and the error messages are pretty ass we can add some [miette]
+//! to the recipe and this is all i can think of.
+//! 
+//! also if we use miette we are gonna need to store where the data is being read
+//! from or to be more precise the range of the data so that we can pinpoint accuretly
+//! where an error occurs. toml_edit seems to be the best for this.
+//! 
+//! i have a whole ass thesis that this is just a small part of so this is only
+//! if like idk people ask me cuz im not editing this after i finish my thesis
+//! (probably???)
 
 mod args;
 mod config;
 mod sigil;
 mod preprocessor;
 mod compiler;
+
+use std::fs;
 
 use clap::Parser;
 use config::Config;
@@ -74,7 +175,7 @@ fn main() {
 
     log::info!("Finished preprocessing.");
 
-    let output = match config.compile() {
+    let output = match config.compile_and_assemble() {
         Ok(output) => output,
         Err(err) => {
             eprintln!("{err}");
@@ -82,8 +183,13 @@ fn main() {
         }
     };
 
-    log::trace!("Compilation output:\n{output}");    
-    log::info!("Finished compiling.")
+    log::info!("Finished compiling and assembling.");
 
-    
+    let output_path = &config.common.output.unwrap();
+    if let Err(e) = fs::write(output_path, &output) {
+        eprintln!("Failed to write output to {}: {e}", output_path.display());
+        panic!();
+    }
+    log::info!("Output written to {}", output_path.display());
+
 }
