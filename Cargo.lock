@@ -917,8 +917,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "xmvagen"
-version = "0.1.0"
+name = "xmva"
+version = "1.0.0"
 dependencies = [
  "clap",
  "colored",
