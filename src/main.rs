@@ -130,14 +130,15 @@
 mod args;
 mod config;
 mod sigil;
+
 mod preprocessor;
 mod compiler;
 
-use std::fs;
+use std::{env, fs};
 
 use clap::Parser;
-use config::Config;
 use args::Arguments;
+use config::Config;
 
 fn main() {
 
@@ -155,41 +156,52 @@ fn main() {
     }    
 
     let config = match Config::load(args.input.as_path()) {
-        Ok(config) => config,
+        Ok(config) => {
+            log::info!("Loaded config.");
+            config
+        },
         Err(err) => {
             eprintln!("{err}"); 
             panic!()
         }
     };
 
-    log::info!("Loaded config.");
+    let output = args.input.as_path();
+    let canon_output = output.canonicalize()
+        .expect("Failed to get absolute path from output file.");
+    let current_dir = canon_output.parent();
 
+    env::set_current_dir(current_dir.clone().unwrap())
+        .expect(format!(
+            "Failed to change the current PWD to {:?}",
+            current_dir
+        ).as_str());
 
     match config.preprocess() {
-        Ok(_) => (),
+        Ok(_) => log::info!("Finished preprocessing."),
         Err(err) => {
             eprintln!("{err}"); 
             panic!()
         }
     }
 
-    log::info!("Finished preprocessing.");
-
     let output = match config.compile_and_assemble() {
-        Ok(output) => output,
+        Ok(output) => {
+            log::info!("Finished compiling and assembling.");
+            output
+        },
         Err(err) => {
             eprintln!("{err}");
             panic!()
         }
     };
 
-    log::info!("Finished compiling and assembling.");
-
     let output_path = &config.common.output.unwrap();
     if let Err(e) = fs::write(output_path, &output) {
         eprintln!("Failed to write output to {}: {e}", output_path.display());
         panic!();
+    } else {
+        log::info!("Output written to {}", output_path.display());
     }
-    log::info!("Output written to {}", output_path.display());
 
 }

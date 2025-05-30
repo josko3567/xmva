@@ -1,7 +1,7 @@
 [common]
-output  = "ya_ecgen.h"
+output  = "./ya_ecgen.h"
 prefix  = "YA_ECGEN_"
-repeats = 10
+repeats = 30
 
 [preamble]
 raw = """

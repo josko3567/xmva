@@ -6,7 +6,7 @@ use strum::EnumProperty;
 
 use crate::{
     config::{
-        Argument, CommonKeyable, Config, Name, StringWithTags
+       Argument, CommonKeyable, Config, Name, StringWithTags
     }, 
     sigil::PreprocessorSigil
 };
@@ -375,7 +375,7 @@ pub fn preprocessor_token_assembly_attempt(
                                 return Ok(None)
                             },
                             Preprocessable::Preprocessed(name) => {
-                                assembled_string.push_str(name);
+                                assembled_string.push_str(name.as_str());
                             }
                         }
                     }

@@ -1,10 +1,10 @@
-use std::{collections::HashMap, mem::discriminant, thread::current, usize};
+use std::{collections::HashMap, mem::discriminant, usize};
 
 use colored::Colorize;
 use strum::{EnumIter, EnumProperty};
 
 use crate::{
-    config::{Argument, Common, Config, Core, Fallbacks, Generator}, main, preprocessor::{Preprocessable, PreprocessableString}, sigil::CompilerSigil
+    config::{Argument, Common, Config, Core, Generator}, preprocessor::{Preprocessable, PreprocessableString}, sigil::CompilerSigil
 };
 
 const REPEAT_SECTION_SUFFIX: &'static str = "__ARGS__";
@@ -560,14 +560,55 @@ fn generate_repeat_picker_macro_name(
 }
 
 fn compile_and_assemble_repeat_string(
-    s: PreprocessableString,
-    fallbacks: &Fallbacks,
+    generator: &Generator,
     common:    &Common,
     core:      &Core,
     suffix:    usize
 ) -> Result<String, Error> {
 
-    let read_guard = fallbacks.empty.read()
+    let read_guard = generator.fallbacks.empty.read()
+         .map_err(|err| Error {
+            kind: ErrorKind::PoisonedLock,
+            message: err.to_string()
+        })?;
+
+    match &*read_guard {
+        Preprocessable::NotPreprocessed(_) => {
+            return Err(Error { 
+                kind: ErrorKind::NotPreprocessed, 
+                message: 
+                format!(
+                    "Recived a string that was not preprocessed during the compilation process: {:?}",
+                    read_guard
+                )
+            })
+        }
+        Preprocessable::Preprocessed(s) => s.clone()
+    };
+    drop(read_guard);
+
+    let read_guard = generator.fallbacks.unparity.read()
+         .map_err(|err| Error {
+            kind: ErrorKind::PoisonedLock,
+            message: err.to_string()
+        })?;
+
+    let fallback_unparity = match &*read_guard {
+        Preprocessable::NotPreprocessed(_) => {
+            return Err(Error { 
+                kind: ErrorKind::NotPreprocessed, 
+                message: 
+                format!(
+                    "Recived a string that was not preprocessed during the compilation process: {:?}",
+                    read_guard
+                )
+            })
+        }
+        Preprocessable::Preprocessed(s) => s.clone()
+    };
+    drop(read_guard);
+
+    let read_guard = generator.fallbacks.empty.read()
          .map_err(|err| Error {
             kind: ErrorKind::PoisonedLock,
             message: err.to_string()
@@ -588,13 +629,34 @@ fn compile_and_assemble_repeat_string(
     };
     drop(read_guard);
 
-    let read_guard = fallbacks.unparity.read()
+    let read_guard = generator.preamble.read()
          .map_err(|err| Error {
             kind: ErrorKind::PoisonedLock,
             message: err.to_string()
         })?;
 
-    let fallback_unparity = match &*read_guard {
+    let preamble = match &*read_guard {
+        Preprocessable::NotPreprocessed(_) => {
+            return Err(Error { 
+                kind: ErrorKind::NotPreprocessed, 
+                message: 
+                format!(
+                    "Recived a string that was not preprocessed during the compilation process: {:?}",
+                    read_guard
+                )
+            })
+        }
+        Preprocessable::Preprocessed(s) => s.clone()
+    };
+    drop(read_guard);
+
+    let read_guard = generator.postamble.read()
+         .map_err(|err| Error {
+            kind: ErrorKind::PoisonedLock,
+            message: err.to_string()
+        })?;
+
+    let postamble = match &*read_guard {
         Preprocessable::NotPreprocessed(_) => {
             return Err(Error { 
                 kind: ErrorKind::NotPreprocessed, 
@@ -621,7 +683,7 @@ fn compile_and_assemble_repeat_string(
                         message: err.to_string()
                     })?;
 
-                let fallback_unparity = match &*read_guard {
+                match &*read_guard {
                     Preprocessable::NotPreprocessed(_) => {
                         return Err(Error { 
                             kind: ErrorKind::NotPreprocessed, 
@@ -654,7 +716,7 @@ fn compile_and_assemble_repeat_string(
         })
     };
 
-    let read_guard = s.read()
+    let read_guard = generator.repeat.read()
          .map_err(|err| Error {
             kind: ErrorKind::PoisonedLock,
             message: err.to_string()
@@ -703,7 +765,10 @@ fn compile_and_assemble_repeat_string(
         generated_repeats.push(')');
         generated_repeats.push(' ');
 
+        
         if current_repetiton % va_args == 0 {
+
+            generated_repeats.push_str(preamble.as_str());
 
             let j = current_repetiton/va_args;
 
@@ -730,6 +795,9 @@ fn compile_and_assemble_repeat_string(
                     }
                 }
             }
+
+            generated_repeats.push_str(postamble.as_str())
+
         } else {
             generated_repeats.push_str(fallback_unparity.as_str());
         }
@@ -770,53 +838,10 @@ fn generate_generator_macro_name(
 
 
 fn assemble_generator_string(
-    generator: &Generator,
     common: &Common,
     core: &Core,
     suffix: usize
 ) -> Result<String, Error> {
-
-    let read_guard = generator.preamble.read()
-         .map_err(|err| Error {
-            kind: ErrorKind::PoisonedLock,
-            message: err.to_string()
-        })?;
-
-    let preamble = match &*read_guard {
-        Preprocessable::NotPreprocessed(_) => {
-            return Err(Error { 
-                kind: ErrorKind::NotPreprocessed, 
-                message: 
-                format!(
-                    "Recived a string that was not preprocessed during the compilation process: {:?}",
-                    read_guard
-                )
-            })
-        }
-        Preprocessable::Preprocessed(s) => s.clone()
-    };
-    drop(read_guard);
-
-    let read_guard = generator.postamble.read()
-         .map_err(|err| Error {
-            kind: ErrorKind::PoisonedLock,
-            message: err.to_string()
-        })?;
-
-    let postamble = match &*read_guard {
-        Preprocessable::NotPreprocessed(_) => {
-            return Err(Error { 
-                kind: ErrorKind::NotPreprocessed, 
-                message: 
-                format!(
-                    "Recived a string that was not preprocessed during the compilation process: {:?}",
-                    read_guard
-                )
-            })
-        }
-        Preprocessable::Preprocessed(s) => s.clone()
-    };
-    drop(read_guard);
 
     let mut named_args: Vec<String> = vec![];
 
@@ -857,11 +882,9 @@ fn assemble_generator_string(
     generator_macro.push_str(", __GEN__, ...");
     generator_macro.push(')');
     generator_macro.push(' ');
-    generator_macro.push_str(preamble.as_str());
     generator_macro.push_str("__GEN__(");
     generator_macro.push_str(named_args.join(", ").as_str());
     generator_macro.push_str(", __VA_ARGS__)");
-    generator_macro.push_str(postamble.as_str());
     generator_macro.push('\n');
 
     Ok(generator_macro)
@@ -932,13 +955,6 @@ fn assemble_main_macro_string(
             }
         }
     }
-
-    let Some(va_args) = some_va_args else {
-        return Err(Error { 
-            kind: ErrorKind::NonExistantArgument, 
-            message: "Missing varadict argument count argument".to_string()
-        })
-    };
 
     let mut main_macro = String::new();
 
@@ -1167,8 +1183,7 @@ impl Config {
 
             repeats.push(
                 compile_and_assemble_repeat_string(
-                    generator.repeat.clone(), 
-                    &generator.fallbacks, 
+                    &generator, 
                     &self.common, 
                     &self.core,
                     i
@@ -1177,7 +1192,6 @@ impl Config {
 
             generators.push(
                 assemble_generator_string(
-                    &generator, 
                     &self.common, 
                     &self.core,
                     i

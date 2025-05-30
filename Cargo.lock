@@ -928,6 +928,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "serde_spanned",
  "serde_with",
  "strum",
  "toml",
