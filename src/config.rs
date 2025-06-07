@@ -1,63 +1,62 @@
-use std::{path::{Path, PathBuf}, sync::{Arc, RwLock}};
+use std::{clone, path::PathBuf, sync::{Arc, RwLock}};
 
-use colored::Colorize;
+use backtrace::Backtrace;
 use lazy_static::lazy_static;
-use strum::{IntoEnumIterator, EnumProperty, EnumIter};
 use serde::{Deserialize, Deserializer, Serialize};
+use strum::{IntoEnumIterator, EnumIter, EnumProperty};
+use toml::Spanned;
+use crate::{compiler::Compilable, error::Error, preprocessor::Preprocessable};
 
-use crate::preprocessor::{Preprocessable, PreprocessableName, PreprocessableString};
+/// Reflective is just a fancy name for a `Arc<RwLock<T>>`
+/// both [Reflective::read] and [Reflective::write] are
+/// integrated with [crate::error::Error] so we don't need
+/// to do a `map_err` every damn time.
+#[derive(Debug, Clone)]
+pub struct Reflective<T>(Arc<RwLock<T>>);
 
-const MAX_REPEATS: usize = 10000; // so i dont accidentaly eat my entire ssd
+impl<T> Reflective<T> {
 
-#[derive(Debug)]
-pub enum Error {
-    IO   {file: PathBuf, message: String},
-    TOML {file: PathBuf, message: String, line: Option<(usize, usize)>},
-    // KeySerialization {message: String},
-    // KeyCompilation {key: String, name: String, message: String},
-    // KeyPreprocessing {key: String, name: String, message: String},
-    // KeyMutualReferencing {key_names: Vec<(String, PreprocessableName)>}
-}
+    pub fn new(value: T) -> Reflective<T> {
+        return Reflective(Arc::new(RwLock::new(value)))
+    }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        _ = write!(f, "[config.rs] ");
-        match self {
-            Self::IO { file, message } => {
-                write!(f, "in config file {:?}: {message}", file)
-            }
-            Self::TOML { file, message, line } => {
-                write!(f, "in config file {:?}: {message}{}",
-                    file, 
-                    if line.is_some() {
-                        format!(" between lines {}-{}", line.unwrap().0, line.unwrap().1)
-                    } else {
-                        "".to_owned()
+    pub fn read(&self) -> miette::Result<T> 
+    where  
+        T: Clone,
+    {
+        Ok(
+            self.0
+                .read()
+                .map_err(|x| { 
+                miette::Report::new(
+                    Error::PoisonedLock { 
+                        error: x.to_string(), 
+                        backtrace: crate::backtrace!(Backtrace::new()) 
                     }
                 )
-            }
-            // Self::KeySerialization { message } => {
-            //     write!(f, "error while compiling keys: `{message}`")
-            // }
-            // Self::KeyCompilation { key, name, message } => {
-            //     write!(f, "error while trying to compile key `{key}` with name `{name}`: `{message}`")
-            // } 
-            // Self::KeyPreprocessing { key, name, message } => {
-            //     write!(f, "error while trying to compile key `{key}` with name `{name}`: `{message}`")
-            // } 
-            // Self::KeyMutualReferencing { key_names } => {
-            //     _ = write!(f, "could not compile all keys as some have a mutual reference. \n");
-            //     _ = write!(f, "here is a list of uncompiled keys: \n");
-            //     for (key, name) in key_names {
-            //         _ = write!(f, "{{Key: {key}, Name: {:?}}}", name);
-            //     }
-            //     write!(f, "")
-            // }
-        }
+                })?
+                .clone()
+        )
     }
-}
 
-impl std::error::Error for Error {}
+    /// Write-lock and replace the inner value.
+    pub fn write(&self, value: T) -> Result<(), crate::error::Error> {
+
+        let mut inner = self.0
+            .write()
+            .map_err(|x| {
+                Error::PoisonedLock { 
+                    error: x.to_string(), 
+                    backtrace: crate::backtrace!(Backtrace::new()) 
+                }.into()
+            })?;
+
+        *inner = value;
+        Ok(())
+              
+    }
+
+}
 
 /// Common configuration values that can be referenced with their name
 /// being the key.
@@ -216,45 +215,50 @@ impl Default for Name {
     }
 }
 
-/// This deserializer flattens [PreprocessableName] 
-/// and automatically stores the [Name] inside of
-/// [Preprocessable::NotPreprocessed].
-fn preprocessable_name_deserializer<'de, D>(
+////////////////////////////////////////////////////////////
+// Custom de.
+ 
+fn reflective_preprocessable_spanned_name_de<'de, D>(
     deserializer: D
-) -> Result<PreprocessableName, D::Error>
-where
-    D: Deserializer<'de>,
+) -> Result<Reflective<Preprocessable<Spanned<Name>>>, D::Error>
+where D: Deserializer<'de>,
 {
-    let unprocessed_name = Name::deserialize(deserializer)?;
-    Ok(Arc::new(RwLock::new(Preprocessable::NotPreprocessed(unprocessed_name))))
+    let name = Spanned::<Name>::deserialize(deserializer)?;
+    
+    Ok(
+        Reflective::new(Preprocessable::new(name))
+    )
 }
 
-/// This deserializer flattens [PreprocessableString] 
-/// and automatically stores the [String] inside of
-/// [Preprocessable::NotPreprocessed].
-fn preprocessable_string_deserializer<'de, D>(
+fn reflective_preprocessable_spanned_string_de<'de, D>(
     deserializer: D
-) -> Result<PreprocessableString, D::Error>
-where
-    D: Deserializer<'de>,
+) -> Result<Reflective<Preprocessable<Spanned<String>>>, D::Error>
+where D: Deserializer<'de>,
 {
-    let unprocessed_string = String::deserialize(deserializer)?;
-    Ok(Arc::new(RwLock::new(Preprocessable::NotPreprocessed(unprocessed_string))))
+    let string = Spanned::<String>::deserialize(deserializer)?;
+    
+    Ok(
+        Reflective::new(Preprocessable::new(string))
+    )
 }
 
-/// Same as [preprocessable_string_deserializer] but with a [Option].
-fn preprocessable_option_string_deserializer<'de, D>(
+fn optional_reflective_preprocessable_spanned_string_de<'de, D>(
     deserializer: D
-) -> Result<Option<PreprocessableString>, D::Error>
-where
-    D: Deserializer<'de>,
+) -> Result<Option<Reflective<Preprocessable<Spanned<String>>>>, D::Error>
+where D: Deserializer<'de>,
 {
-    let optional_unprocessed_string = Option::<String>::deserialize(deserializer)?;
-    match optional_unprocessed_string {
-        Some(string) => Ok(Some(Arc::new(RwLock::new(Preprocessable::NotPreprocessed(string))))),
+    let optional = Option::<Spanned<String>>::deserialize(deserializer)?;
+    match optional {
+        Some(string) => Ok(Some(Reflective::new(Preprocessable::new(string)))),
         None => Ok(None)
     }
 }
+
+// Custom de. end
+////////////////////////////////////////////////////////////
+
+
+
 
 /// A `#define` from C.
 /// 
@@ -284,11 +288,11 @@ where
 #[derive(Deserialize, Debug, Clone)]
 pub struct Definition {
     pub key:        String,
-    #[serde(deserialize_with = "preprocessable_name_deserializer")]
-    pub name:       PreprocessableName,
+    #[serde(deserialize_with = "reflective_preprocessable_spanned_name_de")]
+    pub name:       Reflective<Preprocessable<Spanned<Name>>>,
     pub parameters: Option<Vec<String>>,
-    #[serde(deserialize_with = "preprocessable_string_deserializer")]
-    pub expansion:  PreprocessableString,
+    #[serde(deserialize_with = "reflective_preprocessable_spanned_string_de")]
+    pub expansion:  Reflective<Preprocessable<Spanned<String>>>,
 }
 
 /// Keys that might reference anything from another C file or the
@@ -296,15 +300,15 @@ pub struct Definition {
 #[derive(Deserialize, Debug, Clone)]
 pub struct Key {
     pub key:  String,
-    #[serde(deserialize_with = "preprocessable_name_deserializer")]
-    pub name: PreprocessableName
+    #[serde(deserialize_with = "reflective_preprocessable_spanned_name_de")]
+    pub name: Reflective<Preprocessable<Spanned<Name>>>
 }
 
 /// Custom preamble that is inserted as is (first preprocessed tho).
 #[derive(Deserialize, Debug, Clone)]
 pub struct Preamble {
-    #[serde(deserialize_with = "preprocessable_option_string_deserializer")]
-    pub raw:  Option<PreprocessableString>,
+    #[serde(deserialize_with = "optional_reflective_preprocessable_spanned_string_de")]
+    pub raw:  Option<Reflective<Preprocessable<Spanned<String>>>>,
     pub keys: Option<Vec<Key>>,
 }
 
@@ -312,189 +316,13 @@ pub struct Preamble {
 /// argument counts.
 #[derive(Deserialize, Debug, Clone)]
 pub struct Fallbacks {
-    #[serde(deserialize_with = "preprocessable_string_deserializer")]
+    #[serde(deserialize_with = "preproc")]
     /// What to do when the varadict argument count is not a multiple
     /// of [Paramaters::Varadict] in [Core::args].
-    pub unparity: PreprocessableString,
+    pub unparity: Reflective<Compilable<Spanned<String>>>,
 
     #[serde(deserialize_with = "preprocessable_string_deserializer")]
     /// What to do when the varadict argument count is 0?
     pub empty: PreprocessableString,
 }
 
-/// In this XMVA macro i've invisioned there is but one catch,
-/// there must exist a x-macro for every possible varadict argument
-/// count that the XMVA macro may encounter.
-/// 
-/// This structure configures a generator that generates these
-/// x-macros that then handle the creation of your code for every
-/// varadict argument count up to [`Common::repeats`] amount of
-/// varadict arguments.
-#[derive(Deserialize, Debug, Clone)]
-pub struct Generator {
-    /// On strange varadict argument counts, set what the generated
-    /// x-macro will write out.
-    pub fallbacks: Fallbacks,
-    
-    /// What to write before the repeat part.
-    #[serde(deserialize_with = "preprocessable_string_deserializer")]
-    pub preamble: PreprocessableString,
-    
-    /// Repeat represents a string that can contain arguments passed into
-    /// the `xmva` itself and that will be repeated multiple times in the
-    /// generated code.
-    /// 
-    /// This in sense is the core of a `xmva`.
-    /// 
-    /// Depending on the amount of varadict arguments a `xmva` receives
-    /// it will call a x-macro in which this  string is repeated a
-    /// certaint amount of times (it will repeat for 
-    /// [Argument::Varadict]/`varadict argument count` the `xmva` recived).
-    /// 
-    /// Special sigils
-    /// --------------
-    /// It itself is a [PreprocessableString] meaning it can contain special
-    /// sigils from [crate::sigil::PreprocessorSigil] but it also can contain 
-    /// special sigils from [crate::sigil::CompilerSigil]:
-    /// 
-    /// - `${...}`
-    ///     tells us where to place a named argument:
-    ///     `... ${lowercase_name} ... ${UPPERCASE_NAME}`
-    /// 
-    /// - `$(...)`
-    ///     tells us where to place a varadict argument: 
-    ///     `... $(0) ... $(1) ...`
-    /// 
-    /// - `$[...]`
-    ///     tells us to repeat this character except on the last repeat:
-    ///     `... $[,] ... $[peepee poopoo] ...`
-    /// 
-    /// Example
-    /// -------
-    /// ```TOML
-    /// # Lets say that args -> {varadict = 2}.
-    /// # Which means we require a minimum of 2 varadict arguments.
-    /// # Here our first argument out of our varadict argument pairs
-    /// # will be placed before a comma.
-    /// # This pattern will repeat like this:
-    /// # _00
-    /// # _00, _02
-    /// # _00, _02, 04
-    /// # ...
-    /// repeat = "$(0)[,]"
-    /// 
-    /// # Heres something a tad bit more complex.
-    /// # Let's say ${prefix} is `YA_`.
-    /// # This pattern will repeat like this:
-    /// # [YA_ ## _00] = _01
-    /// # [YA_ ## _00] = _01, [YA_ ## _02] = _03
-    /// # [YA_ ## _00] = _01, [YA_ ## _02] = _03, [YA_ ## _04] = _05
-    /// # ...
-    /// repeat = "[@{prefix} ## $(0)] = $(1)$[,]"
-    /// ```
-    #[serde(deserialize_with = "preprocessable_string_deserializer")]
-    pub repeat: PreprocessableString,
-
-    // What to write after the repeat part.
-    #[serde(deserialize_with = "preprocessable_string_deserializer")]
-    pub postamble: PreprocessableString
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct NamedArgument {
-    pub key: String,
-    #[serde(deserialize_with = "preprocessable_string_deserializer")]
-    pub name: PreprocessableString
-}
-
-/// Types of parameters we pass to our `xmva`.
-/// 
-/// [Argument::Named] is a named parameter the `xmva` will accept and 
-/// have available in the [Generator::repeat] section.
-/// 
-/// [Argument::Varadict] represents the minimum pair size of varadict arguments.
-/// If [Argument::Varadict] =  `2` for example, we can accept 
-/// 2n arguments where n >= 1 and represents a argument pair.
-#[derive(Deserialize, Debug, Clone)]
-#[serde(untagged)]
-pub enum Argument {
-    Named(NamedArgument),
-    Varadict {varadict: usize}
-}
-
-/// The [Core] which holds the main XMVA name and arguments.
-#[derive(Deserialize, Debug, Clone)]
-pub struct Core {
-    /// The name of the `xmva` we want to create.
-    #[serde(deserialize_with = "preprocessable_string_deserializer")]
-    pub xmva: PreprocessableString,
-    /// List of paramaters the `xmva` will accept
-    /// including named parameters and the number of
-    /// varadict arguments.
-    pub args: Vec<Argument>,
-}
-
-/// The main config structure.
-/// Each part of the [Config] and what they do are explained in their own docs.
-/// 
-/// Init
-/// ----
-/// This structure can be initialized from a `.xmva.toml` file.
-/// ```
-/// let config: Config = Config::load(&Path::new("example.xmva.toml"));
-/// ```
-#[derive(Deserialize, Debug, Clone)]
-pub struct Config {
-    pub common:     Common, 
-    pub preamble:   Option<Preamble>,
-    pub definition: Option<Vec<Definition>>,
-    pub core:       Core,
-    pub generator:  Vec<Generator>,
-}
-
-impl Config { 
-
-    pub fn load(path: &Path) -> Result<Self, Error>{
-        
-        log::debug!("Starting to load config.");
-
-        let file_contents = std::fs::read_to_string(path)
-            .map_err(|fs_err| Error::IO { 
-                file: path.to_owned(),
-                message: fs_err.to_string() 
-            })?;
-
-        log::debug!("Loaded file into memory.");
-
-        let mut config: Self = toml::from_str(&file_contents)
-            .map_err(|toml_err| Error::TOML { 
-                file: path.to_owned(),
-                message: toml_err.message().to_owned(), 
-                line: if toml_err.span().is_some() {
-                    let offset_start = toml_err.span().unwrap().start;
-                    let offset_end   = toml_err.span().unwrap().end;
-                    let line_start   = file_contents[..offset_start].lines().count();
-                    let line_end     = file_contents[..offset_end].lines().count();
-                    Some((line_start, line_end))
-                } else {
-                    None
-                }
-            })?;
-
-        // limit repeats
-        config.common.repeats = std::cmp::min(MAX_REPEATS, config.common.repeats);
-
-        if config.common.output.is_none() {
-            config.common.output = Some(path.to_owned());
-        }
-        
-        log::trace!("{}",
-            format!("Config loaded: {:#?}", config)
-            .dimmed()
-        );
-
-        Ok(config)
-
-    }
-
-}

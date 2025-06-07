@@ -3,12 +3,12 @@ use std::{collections::HashMap, mem::discriminant, sync::{Arc, Mutex, RwLock}};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use strum::EnumProperty;
+use toml::Spanned;
 
 use crate::{
     config::{
        Argument, CommonKeyable, Config, Name, StringWithTags
-    }, 
-    sigil::PreprocessorSigil
+    }, metadata::Metadata, sigil::PreprocessorSigil
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -50,10 +50,10 @@ impl std::error::Error for Error {}
 /// [Preprocessable::NotPreprocessed] except the values from [CommonKeyable].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Preprocessable<T>
-where T: Preprocess
+where T: IntoPreprocessorTokens
 {
     NotPreprocessed(T),
-    Preprocessed(String)
+    Preprocessed(Spanned<String>)
 }
 
 impl Default for Preprocessable<Name> {
@@ -72,9 +72,17 @@ impl Default for Preprocessable<String> {
 
 }
 
+impl<T> Preprocessable<T>
+where T: IntoPreprocessorTokens
+{
+    pub fn new(value: T) -> Preprocessable<T> {
+        Self::NotPreprocessed(value)
+    }
+}
+
 /// [Preprocess] is implemented on every type that can be preprocessed
 /// and that are a part of [Preprocessable]. 
-pub trait Preprocess {
+pub trait IntoPreprocessorTokens {
 
     /// Convert the type into a [Vec]<[PreprocessorToken]>,
     /// used since we have key references in preprocessable types
@@ -88,15 +96,17 @@ pub trait Preprocess {
     /// into tokens.
     fn into_preprocessor_tokens(
         &self,
+        metadata: &Metadata,
         keys: &CommonKeyable
     ) -> Result<Vec<PreprocessorToken>, Error>;
 
 }
 
-impl Preprocess for String {
+impl IntoPreprocessorTokens for String {
 
     fn into_preprocessor_tokens(
         &self,
+        metadata: &Metadata,
         _: &CommonKeyable
     ) -> Result<Vec<PreprocessorToken>, Error> {
         
@@ -106,10 +116,24 @@ impl Preprocess for String {
 
 } 
 
-impl Preprocess for Name {
+impl IntoPreprocessorTokens for Spanned<String> {
 
     fn into_preprocessor_tokens(
         &self,
+        metadata: &Metadata,
+        keys: &CommonKeyable
+    ) -> Result<Vec<PreprocessorToken>, Error> 
+    {
+        self.get_ref().into_preprocessor_tokens(metadata, keys)
+    }
+
+}
+
+impl IntoPreprocessorTokens for Name {
+
+    fn into_preprocessor_tokens(
+        &self,
+        metadara: &Metadata,
         keys: &CommonKeyable
     ) -> Result<Vec<PreprocessorToken>, Error> {
 
@@ -126,6 +150,19 @@ impl Preprocess for Name {
     }
 
 }
+
+impl IntoPreprocessorTokens for Spanned<Name> {
+
+    fn into_preprocessor_tokens(
+        &self,
+        metadata: &Metadata,
+        keys: &CommonKeyable
+    ) -> Result<Vec<PreprocessorToken>, Error> 
+    {
+        self.get_ref().into_preprocessor_tokens(metadata, keys)
+    }
+
+} 
 
 /// Preprocessor tokens that will be processed and combined together intož
 /// a finished preprocessed string.

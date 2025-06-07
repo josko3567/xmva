@@ -128,19 +128,32 @@
 //! (probably???)
 
 mod args;
-mod config;
 mod sigil;
-
+mod error;
+mod config;
 mod preprocessor;
 mod compiler;
+mod metadata;
 
-use std::{env, fs};
+mod _config;
+mod _compiler;
+
+use std::{env, fs, path::PathBuf};
 
 use clap::Parser;
 use args::Arguments;
-use config::Config;
+use _config::Config;
 
-fn main() {
+pub fn xmva(
+    config: PathBuf, 
+    contents: String
+) -> miette::Result<()>
+{
+
+    todo!()
+}
+
+fn main() -> miette::Result<()> {
 
     let args = Arguments::parse();
     if args.logging {
@@ -153,55 +166,78 @@ fn main() {
     log::info!("Loaded arguments, input file is {:?}", args.input);
     if args.output.is_some() {
         log::info!("Specified a external output file {:?}", args.output.unwrap())
-    }    
+    }   
 
-    let config = match Config::load(args.input.as_path()) {
-        Ok(config) => {
-            log::info!("Loaded config.");
-            config
-        },
-        Err(err) => {
-            eprintln!("{err}"); 
-            panic!()
-        }
-    };
+    
 
-    let output = args.input.as_path();
-    let canon_output = output.canonicalize()
-        .expect("Failed to get absolute path from output file.");
-    let current_dir = canon_output.parent();
 
-    env::set_current_dir(current_dir.clone().unwrap())
-        .expect(format!(
-            "Failed to change the current PWD to {:?}",
-            current_dir
-        ).as_str());
-
-    match config.preprocess() {
-        Ok(_) => log::info!("Finished preprocessing."),
-        Err(err) => {
-            eprintln!("{err}"); 
-            panic!()
-        }
-    }
-
-    let output = match config.compile_and_assemble() {
-        Ok(output) => {
-            log::info!("Finished compiling and assembling.");
-            output
-        },
-        Err(err) => {
-            eprintln!("{err}");
-            panic!()
-        }
-    };
-
-    let output_path = &config.common.output.unwrap();
-    if let Err(e) = fs::write(output_path, &output) {
-        eprintln!("Failed to write output to {}: {e}", output_path.display());
-        panic!();
-    } else {
-        log::info!("Output written to {}", output_path.display());
-    }
+    
+    todo!()
 
 }
+
+// fn main() {
+
+//     let args = Arguments::parse();
+//     if args.logging {
+//         env_logger::builder()
+//             .filter_level(log::LevelFilter::Trace)
+//             .init();
+//         log::info!("Logs are enabled.");
+//     }
+
+//     log::info!("Loaded arguments, input file is {:?}", args.input);
+//     if args.output.is_some() {
+//         log::info!("Specified a external output file {:?}", args.output.unwrap())
+//     }    
+
+//     let config = match Config::load(args.input.as_path()) {
+//         Ok(config) => {
+//             log::info!("Loaded config.");
+//             config
+//         },
+//         Err(err) => {
+//             eprintln!("{err}"); 
+//             panic!()
+//         }
+//     };
+
+//     // changing the current pwd so that all relative paths are a okay
+//     let output = args.input.as_path();
+//     let canon_output = output.canonicalize()
+//         .expect("Failed to get absolute path from output file.");
+//     let current_dir = canon_output.parent();
+//     env::set_current_dir(current_dir.clone().unwrap())
+//         .expect(format!(
+//             "Failed to change the current PWD to {:?}",
+//             current_dir
+//         ).as_str());
+
+//     match config.preprocess() {
+//         Ok(_) => log::info!("Finished preprocessing."),
+//         Err(err) => {
+//             eprintln!("{err}"); 
+//             panic!()
+//         }
+//     }
+
+//     let output = match config.compile_and_assemble() {
+//         Ok(output) => {
+//             log::info!("Finished compiling and assembling.");
+//             output
+//         },
+//         Err(err) => {
+//             eprintln!("{err}");
+//             panic!()
+//         }
+//     };
+
+//     let output_path = &config.common.output.unwrap();
+//     if let Err(e) = fs::write(output_path, &output) {
+//         eprintln!("Failed to write output to {}: {e}", output_path.display());
+//         panic!();
+//     } else {
+//         log::info!("Output written to {}", output_path.display());
+//     }
+
+// }

@@ -4,7 +4,7 @@ use colored::Colorize;
 use strum::{EnumIter, EnumProperty};
 
 use crate::{
-    config::{Argument, Common, Config, Core, Generator}, preprocessor::{Preprocessable, PreprocessableString}, sigil::CompilerSigil
+    _config::{Argument, Common, Config, Core, Generator}, preprocessor::{Preprocessable, PreprocessableString}, sigil::CompilerSigil
 };
 
 const REPEAT_SECTION_SUFFIX: &'static str = "__ARGS__";
@@ -837,7 +837,7 @@ fn generate_generator_macro_name(
 }
 
 
-fn assemble_generator_string(
+fn assemble_generator_macro_string(
     common: &Common,
     core: &Core,
     suffix: usize
@@ -1174,8 +1174,6 @@ impl Config {
         log::debug!("Assembling preamble...");
         let preamble = self.assemble_preamble()?;
 
-        // during the compilation we compile and assemble the repeat part
-
         let mut repeats: Vec<String> =  vec![];
         let mut generators: Vec<String> = vec![];
         log::debug!("Compiling and assembling the repeat section, and assembling the generator macro...");
@@ -1191,7 +1189,7 @@ impl Config {
             );
 
             generators.push(
-                assemble_generator_string(
+                assemble_generator_macro_string(
                     &self.common, 
                     &self.core,
                     i
